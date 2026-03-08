@@ -266,6 +266,7 @@ export interface AdminMonitor {
   group_name: string | null;
   group_sort_order: number;
   sort_order: number;
+  show_on_status_page: boolean;
   interval_sec: number;
   timeout_ms: number;
   http_method: string | null;
@@ -292,6 +293,7 @@ export interface CreateMonitorInput {
   group_name?: string;
   group_sort_order?: number;
   sort_order?: number;
+  show_on_status_page?: boolean;
   interval_sec?: number;
   timeout_ms?: number;
   http_method?: string;
@@ -309,6 +311,7 @@ export interface PatchMonitorInput {
   group_name?: string | null;
   group_sort_order?: number;
   sort_order?: number;
+  show_on_status_page?: boolean;
   interval_sec?: number;
   timeout_ms?: number;
   http_method?: string;

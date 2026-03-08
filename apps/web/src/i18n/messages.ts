@@ -215,6 +215,7 @@ const en = {
   'admin_dashboard.resolve_incident': 'Resolve Incident',
   'admin_dashboard.create_maintenance': 'Create Maintenance',
   'admin_dashboard.edit_maintenance': 'Edit Maintenance',
+  'admin_dashboard.monitor_visibility_hidden': 'Hidden',
   'admin_dashboard.monitor_test_running': 'Running test for {name}...',
   'admin_dashboard.monitor_test_last': 'Last test: {name}',
   'admin_dashboard.monitor_test_failed': 'Monitor test failed: {name}',
@@ -308,6 +309,9 @@ const en = {
   'monitor_form.group_order_help': 'Lower groups appear first.',
   'monitor_form.sort_order': 'Sort Order',
   'monitor_form.sort_order_help': 'Lower values appear first.',
+  'monitor_form.show_on_status_page': 'Show on status page',
+  'monitor_form.show_on_status_page_help':
+    'Turn this off to hide the monitor from anonymous visitors while keeping checks and notifications active.',
   'monitor_form.type': 'Type',
   'monitor_form.type_http': 'HTTP',
   'monitor_form.type_tcp': 'TCP',
@@ -616,6 +620,7 @@ const zhCn: LocaleMessages = {
   'admin_dashboard.resolve_incident': '解决事件',
   'admin_dashboard.create_maintenance': '新建维护',
   'admin_dashboard.edit_maintenance': '编辑维护',
+  'admin_dashboard.monitor_visibility_hidden': '已隐藏',
   'admin_dashboard.monitor_test_running': '正在对 {name} 执行测试...',
   'admin_dashboard.monitor_test_last': '最近一次测试：{name}',
   'admin_dashboard.monitor_test_failed': '监控测试失败：{name}',
@@ -709,6 +714,9 @@ const zhCn: LocaleMessages = {
   'monitor_form.group_order_help': '数值越小分组越靠前。',
   'monitor_form.sort_order': '监控排序',
   'monitor_form.sort_order_help': '数值越小越靠前。',
+  'monitor_form.show_on_status_page': '在状态页显示',
+  'monitor_form.show_on_status_page_help':
+    '关闭后，匿名访客不会在状态页看到该监控，但探测和通知仍会继续。',
   'monitor_form.type': '类型',
   'monitor_form.type_http': 'HTTP',
   'monitor_form.type_tcp': 'TCP',
@@ -953,6 +961,7 @@ const zhTw: LocaleMessages = {
   'admin_dashboard.resolve_incident': '解決事件',
   'admin_dashboard.create_maintenance': '新增維護',
   'admin_dashboard.edit_maintenance': '編輯維護',
+  'admin_dashboard.monitor_visibility_hidden': '已隱藏',
 
   'admin_analytics.analytics_title': '分析',
   'admin_analytics.overview_title': '總覽',
@@ -1127,6 +1136,7 @@ const ja: LocaleMessages = {
   'admin_dashboard.resolve_incident': 'インシデントを解決',
   'admin_dashboard.create_maintenance': 'メンテナンスを作成',
   'admin_dashboard.edit_maintenance': 'メンテナンスを編集',
+  'admin_dashboard.monitor_visibility_hidden': '非公開',
 
   'admin_analytics.analytics_title': '分析',
   'admin_analytics.overview_title': '概要',
@@ -1302,6 +1312,7 @@ const es: LocaleMessages = {
   'admin_dashboard.resolve_incident': 'Resolver incidente',
   'admin_dashboard.create_maintenance': 'Crear mantenimiento',
   'admin_dashboard.edit_maintenance': 'Editar mantenimiento',
+  'admin_dashboard.monitor_visibility_hidden': 'Oculto',
 
   'admin_analytics.analytics_title': 'Analitica',
   'admin_analytics.overview_title': 'Resumen',

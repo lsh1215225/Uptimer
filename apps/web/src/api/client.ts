@@ -108,6 +108,24 @@ function getAuthHeaders(): HeadersInit {
   return { Authorization: `Bearer ${token}` };
 }
 
+function getOptionalPublicAuth(): {
+  fetchInit: RequestInit;
+  shouldBypassCache: boolean;
+} {
+  const token = localStorage.getItem('admin_token')?.trim();
+  if (!token) {
+    return { fetchInit: {}, shouldBypassCache: false };
+  }
+
+  return {
+    fetchInit: {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    },
+    shouldBypassCache: true,
+  };
+}
+
 function safeJsonParse(text: string): unknown | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -150,21 +168,24 @@ async function handleResponse<T>(res: Response): Promise<T> {
 // Public API
 export async function fetchStatus(): Promise<StatusResponse> {
   const url = `${API_BASE}/public/status`;
-  const cached = getCachedPublic<StatusResponse>(url);
+  const auth = getOptionalPublicAuth();
+  const cached = auth.shouldBypassCache ? null : getCachedPublic<StatusResponse>(url);
   if (cached) return cached;
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, auth.fetchInit);
     const data = await handleResponse<StatusResponse>(res);
-    setCachedPublic(url, data);
-    writePersistedStatusCache(data);
+    if (!auth.shouldBypassCache) {
+      setCachedPublic(url, data);
+      writePersistedStatusCache(data);
+    }
     return data;
   } catch (err) {
     // Prefer returning a cached snapshot over a hard error on weak networks.
-    const persisted = readPersistedStatusCache(10 * 60_000);
+    const persisted = auth.shouldBypassCache ? null : readPersistedStatusCache(10 * 60_000);
     if (persisted) return persisted;
 
-    const stale = getCachedPublic<StatusResponse>(url);
+    const stale = auth.shouldBypassCache ? null : getCachedPublic<StatusResponse>(url);
     if (stale) return stale;
 
     throw err;
@@ -176,15 +197,16 @@ export async function fetchLatency(
   range: '24h' = '24h',
 ): Promise<LatencyResponse> {
   const url = `${API_BASE}/public/monitors/${monitorId}/latency?range=${range}`;
-  const cached = getCachedPublic<LatencyResponse>(url);
+  const auth = getOptionalPublicAuth();
+  const cached = auth.shouldBypassCache ? null : getCachedPublic<LatencyResponse>(url);
   if (cached) return cached;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, auth.fetchInit);
     const data = await handleResponse<LatencyResponse>(res);
-    setCachedPublic(url, data);
+    if (!auth.shouldBypassCache) setCachedPublic(url, data);
     return data;
   } catch (err) {
-    const stale = getCachedPublic<LatencyResponse>(url);
+    const stale = auth.shouldBypassCache ? null : getCachedPublic<LatencyResponse>(url);
     if (stale) return stale;
     throw err;
   }
@@ -195,15 +217,16 @@ export async function fetchUptime(
   range: '24h' | '7d' | '30d' = '24h',
 ): Promise<UptimeResponse> {
   const url = `${API_BASE}/public/monitors/${monitorId}/uptime?range=${range}`;
-  const cached = getCachedPublic<UptimeResponse>(url);
+  const auth = getOptionalPublicAuth();
+  const cached = auth.shouldBypassCache ? null : getCachedPublic<UptimeResponse>(url);
   if (cached) return cached;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, auth.fetchInit);
     const data = await handleResponse<UptimeResponse>(res);
-    setCachedPublic(url, data);
+    if (!auth.shouldBypassCache) setCachedPublic(url, data);
     return data;
   } catch (err) {
-    const stale = getCachedPublic<UptimeResponse>(url);
+    const stale = auth.shouldBypassCache ? null : getCachedPublic<UptimeResponse>(url);
     if (stale) return stale;
     throw err;
   }
@@ -213,15 +236,18 @@ export async function fetchPublicUptimeOverview(
   range: '30d' | '90d' = '30d',
 ): Promise<PublicUptimeOverviewResponse> {
   const url = `${API_BASE}/public/analytics/uptime?range=${range}`;
-  const cached = getCachedPublic<PublicUptimeOverviewResponse>(url);
+  const auth = getOptionalPublicAuth();
+  const cached = auth.shouldBypassCache ? null : getCachedPublic<PublicUptimeOverviewResponse>(url);
   if (cached) return cached;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, auth.fetchInit);
     const data = await handleResponse<PublicUptimeOverviewResponse>(res);
-    setCachedPublic(url, data);
+    if (!auth.shouldBypassCache) setCachedPublic(url, data);
     return data;
   } catch (err) {
-    const stale = getCachedPublic<PublicUptimeOverviewResponse>(url);
+    const stale = auth.shouldBypassCache
+      ? null
+      : getCachedPublic<PublicUptimeOverviewResponse>(url);
     if (stale) return stale;
     throw err;
   }
@@ -231,13 +257,14 @@ export async function fetchPublicMonitorOutages(
   monitorId: number,
   opts: { range?: '30d'; limit?: number; cursor?: number } = {},
 ): Promise<MonitorOutagesResponse> {
+  const auth = getOptionalPublicAuth();
   const qs = new URLSearchParams();
   qs.set('range', opts.range ?? '30d');
   qs.set('limit', String(opts.limit ?? 200));
   if (opts.cursor !== undefined) qs.set('cursor', String(opts.cursor));
 
   const url = `${API_BASE}/public/monitors/${monitorId}/outages?${qs.toString()}`;
-  const res = await fetch(url);
+  const res = await fetch(url, auth.fetchInit);
   return handleResponse<MonitorOutagesResponse>(res);
 }
 
@@ -389,10 +416,11 @@ export async function fetchPublicIncidents(
   cursor?: number,
   opts: { resolvedOnly?: boolean } = {},
 ): Promise<PublicIncidentsResponse> {
+  const auth = getOptionalPublicAuth();
   const qs = new URLSearchParams({ limit: String(limit) });
   if (opts.resolvedOnly) qs.set('resolved_only', '1');
   if (cursor) qs.set('cursor', String(cursor));
-  const res = await fetch(`${API_BASE}/public/incidents?${qs.toString()}`);
+  const res = await fetch(`${API_BASE}/public/incidents?${qs.toString()}`, auth.fetchInit);
   return handleResponse<PublicIncidentsResponse>(res);
 }
 
@@ -401,9 +429,13 @@ export async function fetchPublicMaintenanceWindows(
   limit = 20,
   cursor?: number,
 ): Promise<PublicMaintenanceWindowsResponse> {
+  const auth = getOptionalPublicAuth();
   const qs = new URLSearchParams({ limit: String(limit) });
   if (cursor) qs.set('cursor', String(cursor));
-  const res = await fetch(`${API_BASE}/public/maintenance-windows?${qs.toString()}`);
+  const res = await fetch(
+    `${API_BASE}/public/maintenance-windows?${qs.toString()}`,
+    auth.fetchInit,
+  );
   return handleResponse<PublicMaintenanceWindowsResponse>(res);
 }
 
@@ -412,8 +444,12 @@ export async function fetchPublicDayContext(
   monitorId: number,
   dayStartAt: number,
 ): Promise<PublicDayContextResponse> {
+  const auth = getOptionalPublicAuth();
   const qs = new URLSearchParams({ day_start_at: String(dayStartAt) });
-  const res = await fetch(`${API_BASE}/public/monitors/${monitorId}/day-context?${qs.toString()}`);
+  const res = await fetch(
+    `${API_BASE}/public/monitors/${monitorId}/day-context?${qs.toString()}`,
+    auth.fetchInit,
+  );
   return handleResponse<PublicDayContextResponse>(res);
 }
 

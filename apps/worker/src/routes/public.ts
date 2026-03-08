@@ -4,7 +4,18 @@ import { z } from 'zod';
 import { getDb, monitors } from '@uptimer/db';
 
 import type { Env } from '../env';
+import { hasValidAdminTokenRequest } from '../middleware/auth';
 import { computePublicStatusPayload } from '../public/status';
+import {
+  buildNumberedPlaceholders,
+  chunkPositiveIntegerIds,
+  filterStatusPageScopedMonitorIds,
+  incidentStatusPageVisibilityPredicate,
+  listStatusPageVisibleMonitorIds,
+  maintenanceWindowStatusPageVisibilityPredicate,
+  monitorVisibilityPredicate,
+  shouldIncludeStatusPageScopedItem,
+} from '../public/visibility';
 import {
   applyStatusCacheHeaders,
   readStatusSnapshot,
@@ -28,6 +39,29 @@ function safeJsonParse(text: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function isAuthorizedStatusAdminRequest(c: {
+  env: Pick<Env, 'ADMIN_TOKEN'>;
+  req: { header(name: string): string | undefined };
+}): boolean {
+  return hasValidAdminTokenRequest(c);
+}
+
+function applyPrivateNoStore(res: Response): Response {
+  const vary = res.headers.get('Vary');
+  if (!vary) {
+    res.headers.set('Vary', 'Authorization');
+  } else if (!vary.split(',').some((part) => part.trim().toLowerCase() === 'authorization')) {
+    res.headers.set('Vary', `${vary}, Authorization`);
+  }
+
+  res.headers.set('Cache-Control', 'private, no-store');
+  return res;
+}
+
+function withVisibilityAwareCaching(res: Response, includeHiddenMonitors: boolean): Response {
+  return includeHiddenMonitors ? applyPrivateNoStore(res) : res;
 }
 
 async function readStaleStatusSnapshot(
@@ -329,24 +363,25 @@ async function listIncidentUpdatesByIncidentId(
   incidentIds: number[],
 ): Promise<Map<number, IncidentUpdateRow[]>> {
   const byIncident = new Map<number, IncidentUpdateRow[]>();
-  if (incidentIds.length === 0) return byIncident;
 
-  const placeholders = incidentIds.map((_, idx) => `?${idx + 1}`).join(', ');
-  const sql = `
-    SELECT id, incident_id, status, message, created_at
-    FROM incident_updates
-    WHERE incident_id IN (${placeholders})
-    ORDER BY incident_id, created_at, id
-  `;
+  for (const ids of chunkPositiveIntegerIds(incidentIds)) {
+    const placeholders = buildNumberedPlaceholders(ids.length);
+    const sql = `
+      SELECT id, incident_id, status, message, created_at
+      FROM incident_updates
+      WHERE incident_id IN (${placeholders})
+      ORDER BY incident_id, created_at, id
+    `;
 
-  const { results } = await db
-    .prepare(sql)
-    .bind(...incidentIds)
-    .all<IncidentUpdateRow>();
-  for (const r of results ?? []) {
-    const existing = byIncident.get(r.incident_id) ?? [];
-    existing.push(r);
-    byIncident.set(r.incident_id, existing);
+    const { results } = await db
+      .prepare(sql)
+      .bind(...ids)
+      .all<IncidentUpdateRow>();
+    for (const r of results ?? []) {
+      const existing = byIncident.get(r.incident_id) ?? [];
+      existing.push(r);
+      byIncident.set(r.incident_id, existing);
+    }
   }
 
   return byIncident;
@@ -357,24 +392,25 @@ async function listIncidentMonitorIdsByIncidentId(
   incidentIds: number[],
 ): Promise<Map<number, number[]>> {
   const byIncident = new Map<number, number[]>();
-  if (incidentIds.length === 0) return byIncident;
 
-  const placeholders = incidentIds.map((_, idx) => `?${idx + 1}`).join(', ');
-  const sql = `
-    SELECT incident_id, monitor_id
-    FROM incident_monitors
-    WHERE incident_id IN (${placeholders})
-    ORDER BY incident_id, monitor_id
-  `;
+  for (const ids of chunkPositiveIntegerIds(incidentIds)) {
+    const placeholders = buildNumberedPlaceholders(ids.length);
+    const sql = `
+      SELECT incident_id, monitor_id
+      FROM incident_monitors
+      WHERE incident_id IN (${placeholders})
+      ORDER BY incident_id, monitor_id
+    `;
 
-  const { results } = await db
-    .prepare(sql)
-    .bind(...incidentIds)
-    .all<IncidentMonitorLinkRow>();
-  for (const r of results ?? []) {
-    const existing = byIncident.get(r.incident_id) ?? [];
-    existing.push(r.monitor_id);
-    byIncident.set(r.incident_id, existing);
+    const { results } = await db
+      .prepare(sql)
+      .bind(...ids)
+      .all<IncidentMonitorLinkRow>();
+    for (const r of results ?? []) {
+      const existing = byIncident.get(r.incident_id) ?? [];
+      existing.push(r.monitor_id);
+      byIncident.set(r.incident_id, existing);
+    }
   }
 
   return byIncident;
@@ -411,24 +447,25 @@ async function listMaintenanceWindowMonitorIdsByWindowId(
   windowIds: number[],
 ): Promise<Map<number, number[]>> {
   const byWindow = new Map<number, number[]>();
-  if (windowIds.length === 0) return byWindow;
 
-  const placeholders = windowIds.map((_, idx) => `?${idx + 1}`).join(', ');
-  const sql = `
-    SELECT maintenance_window_id, monitor_id
-    FROM maintenance_window_monitors
-    WHERE maintenance_window_id IN (${placeholders})
-    ORDER BY maintenance_window_id, monitor_id
-  `;
+  for (const ids of chunkPositiveIntegerIds(windowIds)) {
+    const placeholders = buildNumberedPlaceholders(ids.length);
+    const sql = `
+      SELECT maintenance_window_id, monitor_id
+      FROM maintenance_window_monitors
+      WHERE maintenance_window_id IN (${placeholders})
+      ORDER BY maintenance_window_id, monitor_id
+    `;
 
-  const { results } = await db
-    .prepare(sql)
-    .bind(...windowIds)
-    .all<MaintenanceWindowMonitorLinkRow>();
-  for (const r of results ?? []) {
-    const existing = byWindow.get(r.maintenance_window_id) ?? [];
-    existing.push(r.monitor_id);
-    byWindow.set(r.maintenance_window_id, existing);
+    const { results } = await db
+      .prepare(sql)
+      .bind(...ids)
+      .all<MaintenanceWindowMonitorLinkRow>();
+    for (const r of results ?? []) {
+      const existing = byWindow.get(r.maintenance_window_id) ?? [];
+      existing.push(r.monitor_id);
+      byWindow.set(r.maintenance_window_id, existing);
+    }
   }
 
   return byWindow;
@@ -436,6 +473,14 @@ async function listMaintenanceWindowMonitorIdsByWindowId(
 
 publicRoutes.get('/status', async (c) => {
   const now = Math.floor(Date.now() / 1000);
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
+
+  if (includeHiddenMonitors) {
+    const payload = await computePublicStatusPayload(c.env.DB, now, {
+      includeHiddenMonitors: true,
+    });
+    return applyPrivateNoStore(c.json(payload));
+  }
 
   const snapshot = await readStatusSnapshot(c.env.DB, now);
   if (snapshot) {
@@ -486,6 +531,7 @@ publicRoutes.get('/status', async (c) => {
 });
 
 publicRoutes.get('/incidents', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const limit = z.coerce
     .number()
     .int()
@@ -504,6 +550,7 @@ publicRoutes.get('/incidents', async (c) => {
       .optional()
       .default(0)
       .parse(c.req.query('resolved_only')) === 1;
+  const incidentVisibilitySql = incidentStatusPageVisibilityPredicate(includeHiddenMonitors);
 
   let active: IncidentRow[] = [];
   let remaining = limit;
@@ -514,6 +561,7 @@ publicRoutes.get('/incidents', async (c) => {
         SELECT id, title, status, impact, message, started_at, resolved_at
         FROM incidents
         WHERE status != 'resolved'
+          AND ${incidentVisibilitySql}
         ORDER BY started_at DESC, id DESC
         LIMIT ?1
       `,
@@ -529,42 +577,52 @@ publicRoutes.get('/incidents', async (c) => {
   let next_cursor: number | null = null;
 
   if (remaining > 0) {
-    const resolvedLimitPlusOne = remaining + 1;
-
     const baseSql = `
       SELECT id, title, status, impact, message, started_at, resolved_at
       FROM incidents
       WHERE status = 'resolved'
+        AND ${incidentVisibilitySql}
     `;
 
-    const { results: resolvedRows } = cursor
-      ? await c.env.DB.prepare(
-          `
-            ${baseSql}
-              AND id < ?2
-            ORDER BY id DESC
-            LIMIT ?1
-          `,
-        )
-          .bind(resolvedLimitPlusOne, cursor)
-          .all<IncidentRow>()
-      : await c.env.DB.prepare(
-          `
-            ${baseSql}
-            ORDER BY id DESC
-            LIMIT ?1
-          `,
-        )
-          .bind(resolvedLimitPlusOne)
-          .all<IncidentRow>();
+    const resolvedLimitPlusOne = remaining + 1;
+    const batchLimit = Math.max(50, resolvedLimitPlusOne);
+    let seekCursor = cursor;
+    const collected: IncidentRow[] = [];
 
-    const allResolved = resolvedRows ?? [];
-    resolved = allResolved.slice(0, remaining);
+    while (collected.length < resolvedLimitPlusOne) {
+      const { results: resolvedRows } = seekCursor
+        ? await c.env.DB.prepare(
+            `
+              ${baseSql}
+                AND id < ?2
+              ORDER BY id DESC
+              LIMIT ?1
+            `,
+          )
+            .bind(batchLimit, seekCursor)
+            .all<IncidentRow>()
+        : await c.env.DB.prepare(
+            `
+              ${baseSql}
+              ORDER BY id DESC
+              LIMIT ?1
+            `,
+          )
+            .bind(batchLimit)
+            .all<IncidentRow>();
 
-    if (allResolved.length > remaining) {
-      const last = resolved[resolved.length - 1];
-      next_cursor = last ? last.id : null;
+      const allResolved = resolvedRows ?? [];
+      if (allResolved.length === 0) break;
+
+      collected.push(...allResolved);
+
+      const lastRow = allResolved[allResolved.length - 1];
+      if (allResolved.length < batchLimit || !lastRow) break;
+      seekCursor = lastRow.id;
     }
+
+    resolved = collected.slice(0, remaining);
+    next_cursor = collected.length > remaining ? (resolved[resolved.length - 1]?.id ?? null) : null;
   }
 
   const combined = [...active, ...resolved];
@@ -577,19 +635,34 @@ publicRoutes.get('/incidents', async (c) => {
     combined.map((r) => r.id),
   );
 
-  return c.json({
-    incidents: combined.map((r) =>
-      incidentRowToApi(
-        r,
-        updatesByIncidentId.get(r.id) ?? [],
-        monitorIdsByIncidentId.get(r.id) ?? [],
-      ),
-    ),
-    next_cursor,
-  });
+  const visibleMonitorIds = includeHiddenMonitors
+    ? new Set<number>()
+    : await listStatusPageVisibleMonitorIds(c.env.DB, [...monitorIdsByIncidentId.values()].flat());
+
+  return withVisibilityAwareCaching(
+    c.json({
+      incidents: combined.flatMap((r) => {
+        const originalMonitorIds = monitorIdsByIncidentId.get(r.id) ?? [];
+        const filteredMonitorIds = filterStatusPageScopedMonitorIds(
+          originalMonitorIds,
+          visibleMonitorIds,
+          includeHiddenMonitors,
+        );
+
+        if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
+          return [];
+        }
+
+        return [incidentRowToApi(r, updatesByIncidentId.get(r.id) ?? [], filteredMonitorIds)];
+      }),
+      next_cursor,
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 publicRoutes.get('/maintenance-windows', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const limit = z.coerce
     .number()
     .int()
@@ -601,58 +674,88 @@ publicRoutes.get('/maintenance-windows', async (c) => {
   const cursor = z.coerce.number().int().positive().optional().parse(c.req.query('cursor'));
 
   const now = Math.floor(Date.now() / 1000);
-  const limitPlusOne = limit + 1;
-
+  const maintenanceVisibilitySql = maintenanceWindowStatusPageVisibilityPredicate(
+    includeHiddenMonitors,
+  );
   const baseSql = `
     SELECT id, title, message, starts_at, ends_at, created_at
     FROM maintenance_windows
     WHERE ends_at <= ?1
+      AND ${maintenanceVisibilitySql}
   `;
+  const limitPlusOne = limit + 1;
+  const batchLimit = Math.max(50, limitPlusOne);
+  let seekCursor = cursor;
+  const collected: MaintenanceWindowRow[] = [];
 
-  const { results: windowRows } = cursor
-    ? await c.env.DB.prepare(
-        `
-          ${baseSql}
-            AND id < ?3
-          ORDER BY id DESC
-          LIMIT ?2
-        `,
-      )
-        .bind(now, limitPlusOne, cursor)
-        .all<MaintenanceWindowRow>()
-    : await c.env.DB.prepare(
-        `
-          ${baseSql}
-          ORDER BY id DESC
-          LIMIT ?2
-        `,
-      )
-        .bind(now, limitPlusOne)
-        .all<MaintenanceWindowRow>();
+  while (collected.length < limitPlusOne) {
+    const { results: windowRows } = seekCursor
+      ? await c.env.DB.prepare(
+          `
+            ${baseSql}
+              AND id < ?3
+            ORDER BY id DESC
+            LIMIT ?2
+          `,
+        )
+          .bind(now, batchLimit, seekCursor)
+          .all<MaintenanceWindowRow>()
+      : await c.env.DB.prepare(
+          `
+            ${baseSql}
+            ORDER BY id DESC
+            LIMIT ?2
+          `,
+        )
+          .bind(now, batchLimit)
+          .all<MaintenanceWindowRow>();
 
-  const allWindows = windowRows ?? [];
-  const windows = allWindows.slice(0, limit);
+    const allWindows = windowRows ?? [];
+    if (allWindows.length === 0) break;
 
-  let next_cursor: number | null = null;
-  if (allWindows.length > limit) {
-    const last = windows[windows.length - 1];
-    next_cursor = last ? last.id : null;
+    collected.push(...allWindows);
+
+    const lastRow = allWindows[allWindows.length - 1];
+    if (allWindows.length < batchLimit || !lastRow) break;
+    seekCursor = lastRow.id;
   }
+
+  const windows = collected.slice(0, limit);
+  const next_cursor = collected.length > limit ? (windows[windows.length - 1]?.id ?? null) : null;
 
   const monitorIdsByWindowId = await listMaintenanceWindowMonitorIdsByWindowId(
     c.env.DB,
     windows.map((w) => w.id),
   );
 
-  return c.json({
-    maintenance_windows: windows.map((w) =>
-      maintenanceWindowRowToApi(w, monitorIdsByWindowId.get(w.id) ?? []),
-    ),
-    next_cursor,
-  });
+  const visibleMonitorIds = includeHiddenMonitors
+    ? new Set<number>()
+    : await listStatusPageVisibleMonitorIds(c.env.DB, [...monitorIdsByWindowId.values()].flat());
+
+  return withVisibilityAwareCaching(
+    c.json({
+      maintenance_windows: windows.flatMap((w) => {
+        const originalMonitorIds = monitorIdsByWindowId.get(w.id) ?? [];
+        const filteredMonitorIds = filterStatusPageScopedMonitorIds(
+          originalMonitorIds,
+          visibleMonitorIds,
+          includeHiddenMonitors,
+        );
+
+        if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
+          return [];
+        }
+
+        return [maintenanceWindowRowToApi(w, filteredMonitorIds)];
+      }),
+      next_cursor,
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 publicRoutes.get('/monitors/:id/day-context', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const id = z.coerce.number().int().positive().parse(c.req.param('id'));
   const dayStartAt = z.coerce.number().int().nonnegative().parse(c.req.query('day_start_at'));
   const dayEndAt = dayStartAt + 86400;
@@ -662,6 +765,7 @@ publicRoutes.get('/monitors/:id/day-context', async (c) => {
       SELECT id
       FROM monitors
       WHERE id = ?1 AND is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors)}
     `,
   )
     .bind(id)
@@ -717,23 +821,52 @@ publicRoutes.get('/monitors/:id/day-context', async (c) => {
     incidents.map((r) => r.id),
   );
 
-  return c.json({
-    day_start_at: dayStartAt,
-    day_end_at: dayEndAt,
-    maintenance_windows: maintenance.map((w) =>
-      maintenanceWindowRowToApi(w, monitorIdsByWindowId.get(w.id) ?? []),
-    ),
-    incidents: incidents.map((r) =>
-      incidentRowToApi(
-        r,
-        updatesByIncidentId.get(r.id) ?? [],
-        monitorIdsByIncidentId.get(r.id) ?? [],
-      ),
-    ),
-  });
+  const visibleMonitorIds = includeHiddenMonitors
+    ? new Set<number>()
+    : await listStatusPageVisibleMonitorIds(
+        c.env.DB,
+        [...monitorIdsByWindowId.values(), ...monitorIdsByIncidentId.values()].flat(),
+      );
+
+  return withVisibilityAwareCaching(
+    c.json({
+      day_start_at: dayStartAt,
+      day_end_at: dayEndAt,
+      maintenance_windows: maintenance.flatMap((w) => {
+        const originalMonitorIds = monitorIdsByWindowId.get(w.id) ?? [];
+        const filteredMonitorIds = filterStatusPageScopedMonitorIds(
+          originalMonitorIds,
+          visibleMonitorIds,
+          includeHiddenMonitors,
+        );
+
+        if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
+          return [];
+        }
+
+        return [maintenanceWindowRowToApi(w, filteredMonitorIds)];
+      }),
+      incidents: incidents.flatMap((r) => {
+        const originalMonitorIds = monitorIdsByIncidentId.get(r.id) ?? [];
+        const filteredMonitorIds = filterStatusPageScopedMonitorIds(
+          originalMonitorIds,
+          visibleMonitorIds,
+          includeHiddenMonitors,
+        );
+
+        if (!shouldIncludeStatusPageScopedItem(originalMonitorIds, filteredMonitorIds)) {
+          return [];
+        }
+
+        return [incidentRowToApi(r, updatesByIncidentId.get(r.id) ?? [], filteredMonitorIds)];
+      }),
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 publicRoutes.get('/monitors/:id/latency', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const id = z.coerce.number().int().positive().parse(c.req.param('id'));
   const range = latencyRangeSchema.optional().default('24h').parse(c.req.query('range'));
 
@@ -742,6 +875,7 @@ publicRoutes.get('/monitors/:id/latency', async (c) => {
       SELECT id, name
       FROM monitors
       WHERE id = ?1 AND is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors)}
     `,
   )
     .bind(id)
@@ -783,15 +917,18 @@ publicRoutes.get('/monitors/:id/latency', async (c) => {
       ? null
       : Math.round(upLatencies.reduce((acc, v) => acc + v, 0) / upLatencies.length);
 
-  return c.json({
-    monitor: { id: monitor.id, name: monitor.name },
-    range,
-    range_start_at: rangeStart,
-    range_end_at: rangeEnd,
-    avg_latency_ms,
-    p95_latency_ms: p95(upLatencies),
-    points,
-  });
+  return withVisibilityAwareCaching(
+    c.json({
+      monitor: { id: monitor.id, name: monitor.name },
+      range,
+      range_start_at: rangeStart,
+      range_end_at: rangeEnd,
+      avg_latency_ms,
+      p95_latency_ms: p95(upLatencies),
+      points,
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 type OutageRow = { started_at: number; ended_at: number | null };
@@ -822,6 +959,7 @@ function resolveUptimeRangeStart(
 }
 
 publicRoutes.get('/monitors/:id/uptime', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const id = z.coerce.number().int().positive().parse(c.req.param('id'));
   const range = uptimeRangeSchema.optional().default('24h').parse(c.req.query('range'));
 
@@ -831,6 +969,7 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
       FROM monitors m
       LEFT JOIN monitor_state s ON s.monitor_id = m.id
       WHERE m.id = ?1 AND m.is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
     `,
   )
     .bind(id)
@@ -865,7 +1004,10 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
     .bind(id, checksStart, rangeEnd)
     .all<{ checked_at: number; status: string }>();
 
-  const checks = (checkRows ?? []).map((r) => ({ checked_at: r.checked_at, status: toCheckStatus(r.status) }));
+  const checks = (checkRows ?? []).map((r) => ({
+    checked_at: r.checked_at,
+    status: toCheckStatus(r.status),
+  }));
   const effectiveRangeStart = resolveUptimeRangeStart(
     rangeStart,
     rangeEnd,
@@ -875,17 +1017,20 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
   );
   const rangeStartAt = effectiveRangeStart ?? rangeStart;
   if (effectiveRangeStart === null || rangeEnd <= effectiveRangeStart) {
-    return c.json({
-      monitor: { id: monitor.id, name: monitor.name },
-      range,
-      range_start_at: rangeStartAt,
-      range_end_at: rangeEnd,
-      total_sec: 0,
-      downtime_sec: 0,
-      unknown_sec: 0,
-      uptime_sec: 0,
-      uptime_pct: 0,
-    });
+    return withVisibilityAwareCaching(
+      c.json({
+        monitor: { id: monitor.id, name: monitor.name },
+        range,
+        range_start_at: rangeStartAt,
+        range_end_at: rangeEnd,
+        total_sec: 0,
+        downtime_sec: 0,
+        unknown_sec: 0,
+        uptime_sec: 0,
+        uptime_pct: 0,
+      }),
+      includeHiddenMonitors,
+    );
   }
 
   const total_sec = rangeEnd - effectiveRangeStart;
@@ -934,17 +1079,20 @@ publicRoutes.get('/monitors/:id/uptime', async (c) => {
   const uptime_sec = Math.max(0, total_sec - unavailable_sec);
   const uptime_pct = total_sec === 0 ? 0 : (uptime_sec / total_sec) * 100;
 
-  return c.json({
-    monitor: { id: monitor.id, name: monitor.name },
-    range,
-    range_start_at: rangeStartAt,
-    range_end_at: rangeEnd,
-    total_sec,
-    downtime_sec,
-    unknown_sec,
-    uptime_sec,
-    uptime_pct,
-  });
+  return withVisibilityAwareCaching(
+    c.json({
+      monitor: { id: monitor.id, name: monitor.name },
+      range,
+      range_start_at: rangeStartAt,
+      range_end_at: rangeEnd,
+      total_sec,
+      downtime_sec,
+      unknown_sec,
+      uptime_sec,
+      uptime_pct,
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 async function computePartialUptimeTotals(
@@ -975,7 +1123,10 @@ async function computePartialUptimeTotals(
     .bind(monitorId, checksStart, rangeEnd)
     .all<{ checked_at: number; status: string }>();
 
-  const checks = (checkRows ?? []).map((r) => ({ checked_at: r.checked_at, status: toCheckStatus(r.status) }));
+  const checks = (checkRows ?? []).map((r) => ({
+    checked_at: r.checked_at,
+    status: toCheckStatus(r.status),
+  }));
   const effectiveRangeStart = resolveUptimeRangeStart(
     rangeStart,
     rangeEnd,
@@ -1034,6 +1185,7 @@ async function computePartialUptimeTotals(
 }
 
 publicRoutes.get('/analytics/uptime', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const range = uptimeOverviewRangeSchema.optional().default('30d').parse(c.req.query('range'));
 
   const now = Math.floor(Date.now() / 1000);
@@ -1048,6 +1200,7 @@ publicRoutes.get('/analytics/uptime', async (c) => {
       FROM monitors m
       LEFT JOIN monitor_state s ON s.monitor_id = m.id
       WHERE m.is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors, 'm')}
       ORDER BY m.id
     `,
   ).all<{
@@ -1155,17 +1308,27 @@ publicRoutes.get('/analytics/uptime', async (c) => {
 
   const overall_uptime_pct = total_sec === 0 ? 0 : (uptime_sec / total_sec) * 100;
 
-  return c.json({
-    generated_at: now,
-    range,
-    range_start_at: rangeStart,
-    range_end_at: rangeEnd,
-    overall: { total_sec, downtime_sec, unknown_sec, uptime_sec, uptime_pct: overall_uptime_pct },
-    monitors: out,
-  });
+  return withVisibilityAwareCaching(
+    c.json({
+      generated_at: now,
+      range,
+      range_start_at: rangeStart,
+      range_end_at: rangeEnd,
+      overall: {
+        total_sec,
+        downtime_sec,
+        unknown_sec,
+        uptime_sec,
+        uptime_pct: overall_uptime_pct,
+      },
+      monitors: out,
+    }),
+    includeHiddenMonitors,
+  );
 });
 
 publicRoutes.get('/monitors/:id/outages', async (c) => {
+  const includeHiddenMonitors = isAuthorizedStatusAdminRequest(c);
   const id = z.coerce.number().int().positive().parse(c.req.param('id'));
   const range = z.enum(['30d']).optional().default('30d').parse(c.req.query('range'));
   const limit = z.coerce
@@ -1179,7 +1342,12 @@ publicRoutes.get('/monitors/:id/outages', async (c) => {
   const cursor = z.coerce.number().int().positive().optional().parse(c.req.query('cursor'));
 
   const monitor = await c.env.DB.prepare(
-    'SELECT id, created_at FROM monitors WHERE id = ?1 AND is_active = 1',
+    `
+      SELECT id, created_at
+      FROM monitors
+      WHERE id = ?1 AND is_active = 1
+        AND ${monitorVisibilityPredicate(includeHiddenMonitors)}
+    `,
   )
     .bind(id)
     .first<{ id: number; created_at: number }>();
@@ -1238,20 +1406,23 @@ publicRoutes.get('/monitors/:id/outages', async (c) => {
   const page = rows.slice(0, limit);
   const next_cursor = rows.length > limit ? (page[page.length - 1]?.id ?? null) : null;
 
-  return c.json({
-    range: range as '30d',
-    range_start_at: rangeStart,
-    range_end_at: rangeEnd,
-    outages: page.map((r) => ({
-      id: r.id,
-      monitor_id: id,
-      started_at: r.started_at,
-      ended_at: r.ended_at,
-      initial_error: r.initial_error,
-      last_error: r.last_error,
-    })),
-    next_cursor,
-  });
+  return withVisibilityAwareCaching(
+    c.json({
+      range: range as '30d',
+      range_start_at: rangeStart,
+      range_end_at: rangeEnd,
+      outages: page.map((r) => ({
+        id: r.id,
+        monitor_id: id,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        initial_error: r.initial_error,
+        last_error: r.last_error,
+      })),
+      next_cursor,
+    }),
+    includeHiddenMonitors,
+  );
 });
 publicRoutes.get('/health', async (c) => {
   // Minimal DB touch to verify the Worker can connect to D1.

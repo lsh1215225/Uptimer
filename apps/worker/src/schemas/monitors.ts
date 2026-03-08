@@ -26,6 +26,7 @@ export const createMonitorInputSchema = z
     group_name: monitorGroupNameSchema.optional(),
     group_sort_order: monitorGroupSortOrderSchema.optional(),
     sort_order: monitorSortOrderSchema.optional(),
+    show_on_status_page: z.boolean().optional(),
     is_active: z.boolean().optional(),
   })
   .superRefine((val, ctx) => {
@@ -71,6 +72,7 @@ export const patchMonitorInputSchema = z
     group_name: monitorGroupNameSchema.nullable().optional(),
     group_sort_order: monitorGroupSortOrderSchema.optional(),
     sort_order: monitorSortOrderSchema.optional(),
+    show_on_status_page: z.boolean().optional(),
     is_active: z.boolean().optional(),
   })
   .refine((val) => Object.keys(val).length > 0, {

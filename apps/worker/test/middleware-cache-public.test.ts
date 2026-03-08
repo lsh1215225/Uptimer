@@ -27,12 +27,31 @@ function makeContext(options: {
   method: string;
   url: string;
   response: Response;
+  authorization?: string;
   waitUntil?: ReturnType<typeof vi.fn>;
-}): { c: { req: { method: string; url: string }; res: Response; executionCtx: { waitUntil: ReturnType<typeof vi.fn> } }; waitUntil: ReturnType<typeof vi.fn> } {
+}): {
+  c: {
+    req: { method: string; url: string; header(name: string): string | undefined };
+    res: Response;
+    executionCtx: { waitUntil: ReturnType<typeof vi.fn> };
+  };
+  waitUntil: ReturnType<typeof vi.fn>;
+} {
   const waitUntil = options.waitUntil ?? vi.fn();
+  const headers = new Headers();
+  if (options.authorization) {
+    headers.set('Authorization', options.authorization);
+  }
+
   return {
     c: {
-      req: { method: options.method, url: options.url },
+      req: {
+        method: options.method,
+        url: options.url,
+        header(name: string) {
+          return headers.get(name) ?? undefined;
+        },
+      },
       res: options.response,
       executionCtx: { waitUntil },
     },
@@ -141,5 +160,34 @@ describe('middleware/cache-public', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(open).not.toHaveBeenCalled();
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+
+  it('bypasses shared cache for GET requests that carry Authorization', async () => {
+    const store = new Map<string, Response>();
+    const url = 'https://status.example.com/api/v1/public/status';
+    store.set(url, new Response('cached-anon', { status: 200 }));
+    const open = installCacheMock(store);
+    const middleware = cachePublic({ cacheName: 'uptimer-public', maxAgeSeconds: 45 });
+    const { c, waitUntil } = makeContext({
+      method: 'GET',
+      url,
+      authorization: 'Bearer secret-token',
+      response: new Response('seed', { status: 200 }),
+    });
+    const next = vi.fn(async () => {
+      c.res = new Response('live-admin', {
+        status: 200,
+        headers: { 'Cache-Control': 'private, no-store' },
+      });
+    });
+
+    await middleware(c as never, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(open).not.toHaveBeenCalled();
+    expect(waitUntil).not.toHaveBeenCalled();
+    expect(await c.res.text()).toBe('live-admin');
+    expect(await store.get(url)?.text()).toBe('cached-anon');
   });
 });

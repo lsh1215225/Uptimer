@@ -217,7 +217,10 @@ function formatMonitorDisplayName(monitor: Pick<AdminMonitor, 'id' | 'name'>): s
   return `${monitor.name} (#${monitor.id})`;
 }
 
-function formatMonitorDisplayNameById(monitorId: number, monitorNameById: Map<number, string>): string {
+function formatMonitorDisplayNameById(
+  monitorId: number,
+  monitorNameById: Map<number, string>,
+): string {
   const monitorName = monitorNameById.get(monitorId);
   return monitorName ? `${monitorName} (#${monitorId})` : `#${monitorId}`;
 }
@@ -1101,10 +1104,7 @@ export function AdminDashboard() {
               <Card className="p-3 border-red-200 bg-red-50/70 dark:bg-red-500/10 dark:border-red-400/30">
                 <div className="text-sm font-medium text-red-700 dark:text-red-300">
                   {t('admin_dashboard.monitor_test_failed', {
-                    name: formatMonitorDisplayNameById(
-                      monitorTestError.monitorId,
-                      monitorNameById,
-                    ),
+                    name: formatMonitorDisplayNameById(monitorTestError.monitorId, monitorNameById),
                   })}
                 </div>
                 <div className="mt-1 text-xs text-red-600 dark:text-red-400">
@@ -1499,11 +1499,16 @@ export function AdminDashboard() {
                                       />
                                     </td>
                                     <td className="px-3 sm:px-4 py-3 text-sm font-medium text-slate-900 dark:text-slate-100">
-                                      <div className="flex items-center gap-1.5">
+                                      <div className="flex flex-wrap items-center gap-1.5">
                                         <span className="truncate">{m.name}</span>
                                         <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
                                           #{m.id}
                                         </span>
+                                        {!m.show_on_status_page && (
+                                          <Badge variant="unknown">
+                                            {t('admin_dashboard.monitor_visibility_hidden')}
+                                          </Badge>
+                                        )}
                                       </div>
                                     </td>
                                     <td className="px-3 sm:px-4 py-3 text-xs text-slate-600 dark:text-slate-300">

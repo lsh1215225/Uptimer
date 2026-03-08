@@ -37,6 +37,7 @@ export const monitors = sqliteTable(
     groupName: text('group_name'),
     groupSortOrder: integer('group_sort_order').notNull().default(0),
     sortOrder: integer('sort_order').notNull().default(0),
+    showOnStatusPage: integer('show_on_status_page', { mode: 'boolean' }).notNull().default(true),
     isActive: integer('is_active', { mode: 'boolean' }).notNull().default(true),
     createdAt: integer('created_at')
       .notNull()

@@ -149,6 +149,10 @@ describe('public/status payload regression', () => {
         all: () => [{ incident_id: 5, monitor_id: 11 }],
       },
       {
+        match: (sql) => sql.includes('from monitors') && sql.includes('show_on_status_page = 1'),
+        all: () => [{ id: 11 }],
+      },
+      {
         match: 'from incident_updates',
         all: () => [
           {
@@ -677,4 +681,339 @@ describe('public/status payload regression', () => {
     });
     expect(today?.uptime_pct).toBeCloseTo(100, 6);
   });
+});
+
+it('filters hidden monitors and hidden-only scoped events from anonymous status payloads', async () => {
+  const now = 1_728_500_000;
+
+  const handlers: FakeD1QueryHandler[] = [
+    {
+      match: (sql) => sql.includes('from monitors m') && sql.includes('show_on_status_page = 1'),
+      all: () => [
+        {
+          id: 11,
+          name: 'Public API',
+          type: 'http',
+          group_name: 'Core',
+          group_sort_order: 0,
+          sort_order: 0,
+          interval_sec: 60,
+          created_at: now - 40 * 86_400,
+          state_status: 'up',
+          last_checked_at: now - 30,
+          last_latency_ms: 84,
+        },
+      ],
+    },
+    {
+      match: (sql) => sql.includes('from monitors m') && sql.includes('and 1 = 1'),
+      all: () => [
+        {
+          id: 11,
+          name: 'Public API',
+          type: 'http',
+          group_name: 'Core',
+          group_sort_order: 0,
+          sort_order: 0,
+          interval_sec: 60,
+          created_at: now - 40 * 86_400,
+          state_status: 'up',
+          last_checked_at: now - 30,
+          last_latency_ms: 84,
+        },
+        {
+          id: 22,
+          name: 'Private Admin',
+          type: 'http',
+          group_name: 'Internal',
+          group_sort_order: 1,
+          sort_order: 0,
+          interval_sec: 60,
+          created_at: now - 40 * 86_400,
+          state_status: 'down',
+          last_checked_at: now - 30,
+          last_latency_ms: 120,
+        },
+      ],
+    },
+    {
+      match: 'select distinct mwm.monitor_id',
+      all: () => [],
+    },
+    {
+      match: 'select value from settings where key = ?1',
+      first: (args) => (args[0] === 'uptime_rating_level' ? { value: '3' } : null),
+    },
+    {
+      match: 'row_number() over',
+      all: () => [],
+    },
+    {
+      match: 'from monitor_daily_rollups',
+      all: () => [],
+    },
+    {
+      match: (sql) => sql.includes('from outages') && sql.includes('monitor_id in'),
+      all: () => [],
+    },
+    {
+      match: (sql) =>
+        sql.includes('select monitor_id, checked_at, status') && sql.includes('monitor_id in'),
+      all: () => [],
+    },
+    {
+      match: (sql) => sql.includes('from incidents') && sql.includes("where status != 'resolved'"),
+      all: () => [
+        {
+          id: 1,
+          title: 'Private control plane outage',
+          status: 'identified',
+          impact: 'major',
+          message: 'Internal only',
+          started_at: now - 600,
+          resolved_at: null,
+        },
+        {
+          id: 2,
+          title: 'Shared API latency',
+          status: 'monitoring',
+          impact: 'minor',
+          message: 'Customer-visible',
+          started_at: now - 300,
+          resolved_at: null,
+        },
+      ],
+    },
+    {
+      match: 'from incident_monitors',
+      all: () => [
+        { incident_id: 1, monitor_id: 22 },
+        { incident_id: 2, monitor_id: 11 },
+        { incident_id: 2, monitor_id: 22 },
+      ],
+    },
+    {
+      match: 'from incident_updates',
+      all: () => [],
+    },
+    {
+      match: 'from maintenance_windows where starts_at <= ?1 and ends_at > ?1',
+      all: () => [
+        {
+          id: 5,
+          title: 'Private cluster maintenance',
+          message: 'Do not expose',
+          starts_at: now - 900,
+          ends_at: now + 900,
+          created_at: now - 1_800,
+        },
+      ],
+    },
+    {
+      match: 'from maintenance_windows where starts_at > ?1',
+      all: () => [
+        {
+          id: 6,
+          title: 'Shared API rollout',
+          message: 'Public notice',
+          starts_at: now + 3_600,
+          ends_at: now + 7_200,
+          created_at: now - 1_200,
+        },
+      ],
+    },
+    {
+      match: 'from maintenance_window_monitors',
+      all: () => [
+        { maintenance_window_id: 5, monitor_id: 22 },
+        { maintenance_window_id: 6, monitor_id: 11 },
+        { maintenance_window_id: 6, monitor_id: 22 },
+      ],
+    },
+    {
+      match: (sql) => sql.includes('from monitors') && sql.includes('show_on_status_page = 1'),
+      all: () => [{ id: 11 }],
+    },
+    {
+      match: 'select key, value from settings',
+      all: () => [{ key: 'site_title', value: 'Status Hub' }],
+    },
+  ];
+
+  const db = createFakeD1Database(handlers);
+
+  const anonymousPayload = await computePublicStatusPayload(db, now);
+  expect(anonymousPayload.monitors.map((monitor) => monitor.id)).toEqual([11]);
+  expect(anonymousPayload.active_incidents).toHaveLength(1);
+  expect(anonymousPayload.active_incidents[0]).toMatchObject({
+    id: 2,
+    monitor_ids: [11],
+  });
+  expect(anonymousPayload.maintenance_windows.active).toEqual([]);
+  expect(anonymousPayload.maintenance_windows.upcoming[0]).toMatchObject({
+    id: 6,
+    monitor_ids: [11],
+  });
+  expect(anonymousPayload.banner).toMatchObject({
+    source: 'incident',
+    status: 'partial_outage',
+  });
+
+  const adminPayload = await computePublicStatusPayload(db, now, { includeHiddenMonitors: true });
+  expect(adminPayload.monitors.map((monitor) => monitor.id)).toEqual([11, 22]);
+  expect(adminPayload.active_incidents.map((incident) => incident.id)).toEqual([1, 2]);
+  expect(adminPayload.active_incidents[0]?.monitor_ids).toEqual([22]);
+  expect(adminPayload.maintenance_windows.active[0]?.monitor_ids).toEqual([22]);
+  expect(adminPayload.maintenance_windows.upcoming[0]?.monitor_ids).toEqual([11, 22]);
+  expect(adminPayload.banner).toMatchObject({
+    source: 'incident',
+    status: 'major_outage',
+  });
+});
+
+it('bounds anonymous incident and maintenance status queries before expanding related rows', async () => {
+  const now = 1_728_510_000;
+  const activeIncidentSqls: string[] = [];
+  const activeIncidentArgs: unknown[][] = [];
+  const activeMaintenanceSqls: string[] = [];
+  const activeMaintenanceArgs: unknown[][] = [];
+  const upcomingMaintenanceSqls: string[] = [];
+  const upcomingMaintenanceArgs: unknown[][] = [];
+
+  const handlers: FakeD1QueryHandler[] = [
+    {
+      match: (sql) => sql.includes('from monitors m') && sql.includes('show_on_status_page = 1'),
+      all: () => [
+        {
+          id: 11,
+          name: 'Public API',
+          type: 'http',
+          group_name: 'Core',
+          group_sort_order: 0,
+          sort_order: 0,
+          interval_sec: 60,
+          created_at: now - 40 * 86_400,
+          state_status: 'up',
+          last_checked_at: now - 30,
+          last_latency_ms: 84,
+        },
+      ],
+    },
+    {
+      match: 'select distinct mwm.monitor_id',
+      all: () => [],
+    },
+    {
+      match: 'select value from settings where key = ?1',
+      first: (args) => (args[0] === 'uptime_rating_level' ? { value: '3' } : null),
+    },
+    {
+      match: 'row_number() over',
+      all: () => [],
+    },
+    {
+      match: 'from monitor_daily_rollups',
+      all: () => [],
+    },
+    {
+      match: (sql) => sql.includes('from outages') && sql.includes('monitor_id in'),
+      all: () => [],
+    },
+    {
+      match: (sql) =>
+        sql.includes('select monitor_id, checked_at, status') && sql.includes('monitor_id in'),
+      all: () => [],
+    },
+    {
+      match: (sql) => sql.includes('from incidents') && sql.includes("where status != 'resolved'"),
+      all: (args, sql) => {
+        activeIncidentArgs.push([...args]);
+        activeIncidentSqls.push(sql);
+        return [
+          {
+            id: 2,
+            title: 'Shared API latency',
+            status: 'monitoring',
+            impact: 'minor',
+            message: 'Customer-visible',
+            started_at: now - 300,
+            resolved_at: null,
+          },
+        ];
+      },
+    },
+    {
+      match: 'from incident_monitors',
+      all: () => [{ incident_id: 2, monitor_id: 11 }],
+    },
+    {
+      match: 'from incident_updates',
+      all: () => [],
+    },
+    {
+      match: 'from maintenance_windows where starts_at <= ?1 and ends_at > ?1',
+      all: (args, sql) => {
+        activeMaintenanceArgs.push([...args]);
+        activeMaintenanceSqls.push(sql);
+        return [
+          {
+            id: 5,
+            title: 'Shared API maintenance',
+            message: 'Public notice',
+            starts_at: now - 900,
+            ends_at: now + 900,
+            created_at: now - 1_800,
+          },
+        ];
+      },
+    },
+    {
+      match: 'from maintenance_windows where starts_at > ?1',
+      all: (args, sql) => {
+        upcomingMaintenanceArgs.push([...args]);
+        upcomingMaintenanceSqls.push(sql);
+        return [
+          {
+            id: 6,
+            title: 'Shared API rollout',
+            message: 'Public notice',
+            starts_at: now + 3_600,
+            ends_at: now + 7_200,
+            created_at: now - 1_200,
+          },
+        ];
+      },
+    },
+    {
+      match: 'from maintenance_window_monitors',
+      all: () => [
+        { maintenance_window_id: 5, monitor_id: 11 },
+        { maintenance_window_id: 6, monitor_id: 11 },
+      ],
+    },
+    {
+      match: (sql) => sql.includes('from monitors') && sql.includes('show_on_status_page = 1'),
+      all: () => [{ id: 11 }],
+    },
+    {
+      match: 'select key, value from settings',
+      all: () => [],
+    },
+  ];
+
+  const payload = await computePublicStatusPayload(createFakeD1Database(handlers), now);
+
+  expect(activeIncidentArgs[0]).toEqual([5]);
+  expect(activeIncidentSqls[0]).toContain('limit ?1');
+  expect(activeIncidentSqls[0]).toContain('not exists');
+  expect(activeIncidentSqls[0]).toContain('show_on_status_page = 1');
+  expect(activeMaintenanceArgs[0]).toEqual([now, 3]);
+  expect(activeMaintenanceSqls[0]).toContain('limit ?2');
+  expect(activeMaintenanceSqls[0]).toContain('not exists');
+  expect(upcomingMaintenanceArgs[0]).toEqual([now, 5]);
+  expect(upcomingMaintenanceSqls[0]).toContain('limit ?2');
+  expect(upcomingMaintenanceSqls[0]).toContain('show_on_status_page = 1');
+  expect(payload.active_incidents.map((incident) => incident.id)).toEqual([2]);
+  expect(payload.maintenance_windows.active.map((window) => window.id)).toEqual([5]);
+  expect(payload.maintenance_windows.upcoming.map((window) => window.id)).toEqual([6]);
 });

@@ -1,13 +1,19 @@
 import type { MiddlewareHandler } from 'hono';
 
+function hasAuthorizationHeader(req: { header?(name: string): string | undefined }): boolean {
+  return Boolean(req.header?.('Authorization'));
+}
+
 // Cache public (unauthenticated) GET responses at the edge.
 // This reduces D1 read pressure and greatly improves TTFB on slow networks.
 //
-// IMPORTANT: If a handler already set Cache-Control, we respect it (do not override).
+// IMPORTANT: Authorization-bearing requests bypass the shared cache entirely because
+// public endpoints can return admin-only payloads when a valid bearer token is present.
+// If a handler already set Cache-Control, we respect it (do not override).
 // This allows endpoints like `/public/status` to precisely control freshness (<= 60s).
 export function cachePublic(opts: { cacheName: string; maxAgeSeconds: number }): MiddlewareHandler {
   return async (c, next) => {
-    if (c.req.method !== 'GET') {
+    if (c.req.method !== 'GET' || hasAuthorizationHeader(c.req)) {
       await next();
       return;
     }

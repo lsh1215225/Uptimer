@@ -245,6 +245,7 @@ function monitorRowToApi(
     group_name: groupName,
     group_sort_order: row.groupSortOrder,
     sort_order: row.sortOrder,
+    show_on_status_page: row.showOnStatusPage,
     is_active: row.isActive,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
@@ -418,6 +419,7 @@ adminRoutes.post('/monitors', async (c) => {
       groupName,
       groupSortOrder,
       sortOrder: input.sort_order ?? 0,
+      showOnStatusPage: input.show_on_status_page ?? true,
       isActive: input.is_active ?? true,
       createdAt: now,
       updatedAt: now,
@@ -519,6 +521,7 @@ adminRoutes.patch('/monitors/:id', async (c) => {
       groupName: nextGroupName,
       groupSortOrder: nextGroupSortOrder,
       sortOrder: input.sort_order ?? existing.sortOrder,
+      showOnStatusPage: input.show_on_status_page ?? existing.showOnStatusPage,
       isActive: input.is_active ?? existing.isActive,
       updatedAt: now,
     })

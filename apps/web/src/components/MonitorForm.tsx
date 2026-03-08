@@ -179,6 +179,7 @@ export function MonitorForm(props: CreateProps | EditProps) {
   const [groupName, setGroupName] = useState(monitor?.group_name ?? '');
   const [groupSortOrder, setGroupSortOrder] = useState(monitor?.group_sort_order ?? 0);
   const [sortOrder, setSortOrder] = useState(monitor?.sort_order ?? 0);
+  const [showOnStatusPage, setShowOnStatusPage] = useState(monitor?.show_on_status_page ?? true);
   const [type, setType] = useState<MonitorType>(monitor?.type ?? 'http');
   const [target, setTarget] = useState(monitor?.target ?? '');
   const [intervalSec, setIntervalSec] = useState(monitor?.interval_sec ?? 60);
@@ -236,6 +237,7 @@ export function MonitorForm(props: CreateProps | EditProps) {
       target: target.trim(),
       group_sort_order: groupSortOrder,
       sort_order: sortOrder,
+      show_on_status_page: showOnStatusPage,
       interval_sec: intervalSec,
       timeout_ms: timeoutMs,
     };
@@ -383,6 +385,25 @@ export function MonitorForm(props: CreateProps | EditProps) {
           />
           <div className={FIELD_HELP_CLASS}>{t('monitor_form.sort_order_help')}</div>
         </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-700 dark:bg-slate-800/40">
+        <label className="flex items-start gap-3 text-sm text-slate-700 dark:text-slate-300">
+          <input
+            type="checkbox"
+            checked={showOnStatusPage}
+            onChange={(e) => setShowOnStatusPage(e.target.checked)}
+            className="mt-1"
+          />
+          <span>
+            <span className="font-medium text-slate-900 dark:text-slate-100">
+              {t('monitor_form.show_on_status_page')}
+            </span>
+            <span className={`mt-1 block ${FIELD_HELP_CLASS}`}>
+              {t('monitor_form.show_on_status_page_help')}
+            </span>
+          </span>
+        </label>
       </div>
 
       <div>

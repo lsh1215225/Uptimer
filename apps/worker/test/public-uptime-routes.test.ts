@@ -25,10 +25,19 @@ function installCacheMock(store: CacheStore) {
   return open;
 }
 
-async function requestPublic(path: string, handlers: FakeD1QueryHandler[]) {
-  const env = { DB: createFakeD1Database(handlers) } as unknown as Env;
+async function requestPublic(
+  path: string,
+  handlers: FakeD1QueryHandler[],
+  opts: { adminToken?: string; authorization?: string } = {},
+) {
+  const env = {
+    DB: createFakeD1Database(handlers),
+    ADMIN_TOKEN: opts.adminToken ?? 'test-admin-token',
+  } as unknown as Env;
   const res = await publicRoutes.fetch(
-    new Request(`https://status.example.com${path}`),
+    new Request(`https://status.example.com${path}`, {
+      headers: opts.authorization ? { Authorization: opts.authorization } : undefined,
+    }),
     env,
     { waitUntil: vi.fn() } as unknown as ExecutionContext,
   );
@@ -159,6 +168,252 @@ describe('public routes uptime regression', () => {
           id: 21,
           total_sec: 3_600,
           downtime_sec: 300,
+        },
+      ],
+    });
+  });
+
+  it('serves hidden monitor uptime to authorized admins with private cache headers', async () => {
+    const rangeEnd = 1_728_000_000;
+    const rangeStart = rangeEnd - 86_400;
+
+    vi.spyOn(Date, 'now').mockReturnValue(rangeEnd * 1000 + 5_000);
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: (sql) => sql.includes('from monitors m') && sql.includes('and 1 = 1'),
+        first: () => ({
+          id: 77,
+          name: 'Private Admin API',
+          interval_sec: 60,
+          created_at: rangeStart - 10 * 86_400,
+          last_checked_at: rangeEnd - 30,
+        }),
+      },
+      {
+        match: 'from check_results',
+        all: () => [
+          { checked_at: rangeStart - 60, status: 'up' },
+          { checked_at: rangeEnd - 60, status: 'up' },
+        ],
+      },
+      {
+        match: 'from outages',
+        all: () => [],
+      },
+    ];
+
+    const { res, body } = await requestPublic('/monitors/77/uptime?range=24h', handlers, {
+      adminToken: 'secret-token',
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(res.headers.get('Vary')).toContain('Authorization');
+    expect(body).toMatchObject({
+      monitor: { id: 77, name: 'Private Admin API' },
+      range_start_at: rangeStart,
+      range_end_at: rangeEnd,
+      total_sec: 86_400,
+      downtime_sec: 0,
+    });
+  });
+});
+
+describe('public incident feed regression', () => {
+  const originalCaches = (globalThis as { caches?: unknown }).caches;
+
+  beforeEach(() => {
+    installCacheMock(new Map());
+  });
+
+  afterEach(() => {
+    if (originalCaches === undefined) {
+      delete (globalThis as { caches?: unknown }).caches;
+    } else {
+      Object.defineProperty(globalThis, 'caches', {
+        configurable: true,
+        value: originalCaches,
+      });
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('filters anonymous incident feeds in SQL before applying the active limit', async () => {
+    const now = 1_728_520_000;
+    const activeIncidentSqls: string[] = [];
+    const activeIncidentArgs: unknown[][] = [];
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: (sql) => sql.includes('from incidents') && sql.includes("where status != 'resolved'"),
+        all: (args, sql) => {
+          activeIncidentArgs.push([...args]);
+          activeIncidentSqls.push(sql);
+          return [
+            {
+              id: 2,
+              title: 'Shared API latency',
+              status: 'monitoring',
+              impact: 'minor',
+              message: 'Customer-visible',
+              started_at: now - 300,
+              resolved_at: null,
+            },
+          ];
+        },
+      },
+      {
+        match: 'from incident_updates',
+        all: () => [],
+      },
+      {
+        match: 'from incident_monitors',
+        all: () => [{ incident_id: 2, monitor_id: 11 }],
+      },
+      {
+        match: (sql) => sql.includes('from monitors') && sql.includes('show_on_status_page = 1'),
+        all: () => [{ id: 11 }],
+      },
+    ];
+
+    const { res, body } = await requestPublic('/incidents?limit=1', handlers);
+
+    expect(res.status).toBe(200);
+    expect(activeIncidentArgs[0]).toEqual([1]);
+    expect(activeIncidentSqls[0]).toContain('limit ?1');
+    expect(activeIncidentSqls[0]).toContain('not exists');
+    expect(activeIncidentSqls[0]).toContain('show_on_status_page = 1');
+    expect(body).toMatchObject({
+      incidents: [
+        {
+          id: 2,
+          status: 'monitoring',
+          monitor_ids: [11],
+          updates: [],
+        },
+      ],
+      next_cursor: null,
+    });
+  });
+});
+
+describe('public route cache/auth regression', () => {
+  const originalCaches = (globalThis as { caches?: unknown }).caches;
+
+  afterEach(() => {
+    if (originalCaches === undefined) {
+      delete (globalThis as { caches?: unknown }).caches;
+    } else {
+      Object.defineProperty(globalThis, 'caches', {
+        configurable: true,
+        value: originalCaches,
+      });
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('bypasses anonymous cache entries for authorized incident requests', async () => {
+    const store = new Map<string, Response>();
+    installCacheMock(store);
+    const now = 1_728_530_000;
+
+    const handlers: FakeD1QueryHandler[] = [
+      {
+        match: (sql) =>
+          sql.includes('from incidents') &&
+          sql.includes("where status != 'resolved'") &&
+          sql.includes('show_on_status_page = 1'),
+        all: () => [
+          {
+            id: 2,
+            title: 'Shared API latency',
+            status: 'monitoring',
+            impact: 'minor',
+            message: 'Customer-visible',
+            started_at: now - 300,
+            resolved_at: null,
+          },
+        ],
+      },
+      {
+        match: (sql) =>
+          sql.includes('from incidents') &&
+          sql.includes("where status != 'resolved'") &&
+          sql.includes('1 = 1'),
+        all: () => [
+          {
+            id: 1,
+            title: 'Private control plane outage',
+            status: 'identified',
+            impact: 'major',
+            message: 'Internal only',
+            started_at: now - 120,
+            resolved_at: null,
+          },
+        ],
+      },
+      {
+        match: 'from incident_updates',
+        all: () => [],
+      },
+      {
+        match: 'from incident_monitors',
+        all: () => [
+          { incident_id: 1, monitor_id: 22 },
+          { incident_id: 2, monitor_id: 11 },
+        ],
+      },
+      {
+        match: (sql) => sql.includes('from monitors') && sql.includes('show_on_status_page = 1'),
+        all: () => [{ id: 11 }],
+      },
+    ];
+
+    const anonymous = await requestPublic('/incidents?limit=1', handlers);
+    expect(anonymous.res.status).toBe(200);
+    expect(anonymous.body).toMatchObject({
+      incidents: [
+        {
+          id: 2,
+          monitor_ids: [11],
+        },
+      ],
+    });
+
+    const cachedAnonymous = store.get('https://status.example.com/incidents?limit=1')?.clone();
+    expect(cachedAnonymous).toBeDefined();
+    expect(await cachedAnonymous?.json()).toMatchObject({
+      incidents: [
+        {
+          id: 2,
+        },
+      ],
+    });
+
+    const admin = await requestPublic('/incidents?limit=1', handlers, {
+      adminToken: 'secret-token',
+      authorization: 'Bearer secret-token',
+    });
+
+    expect(admin.res.status).toBe(200);
+    expect(admin.res.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(admin.res.headers.get('Vary')).toContain('Authorization');
+    expect(admin.body).toMatchObject({
+      incidents: [
+        {
+          id: 1,
+          monitor_ids: [22],
+        },
+      ],
+    });
+
+    const cachedAfterAdmin = store.get('https://status.example.com/incidents?limit=1')?.clone();
+    expect(await cachedAfterAdmin?.json()).toMatchObject({
+      incidents: [
+        {
+          id: 2,
         },
       ],
     });
