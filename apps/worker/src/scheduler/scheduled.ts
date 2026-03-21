@@ -15,9 +15,7 @@ import { computeNextState, type MonitorStateSnapshot } from '../monitor/state-ma
 import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
 import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
-import { computePublicStatusPayload } from '../public/status';
 import { readSettings } from '../settings';
-import { refreshPublicStatusSnapshot } from '../snapshots';
 import { acquireLease } from './lock';
 
 const LOCK_NAME = 'scheduler:tick';
@@ -62,18 +60,6 @@ type NotifyContext = {
   envRecord: Record<string, unknown>;
   channels: WebhookChannelWithMeta[];
 };
-
-function scheduleSnapshotRefresh(env: Env, ctx: ExecutionContext, now: number): void {
-  ctx.waitUntil(
-    refreshPublicStatusSnapshot({
-      db: env.DB,
-      now,
-      compute: () => computePublicStatusPayload(env.DB, now),
-    }).catch((err) => {
-      console.warn('scheduled: status snapshot refresh failed', err);
-    }),
-  );
-}
 
 async function listActiveWebhookChannels(db: D1Database): Promise<WebhookChannelWithMeta[]> {
   const { results } = await db
@@ -654,9 +640,9 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     }
   }
 
+  // Public status snapshots are refreshed by the /status request path and admin write paths.
+  // Keep scheduled focused on probing, persistence, and notifications.
   if (due.length === 0) {
-    // Still refresh snapshots even if no monitors are due.
-    scheduleSnapshotRefresh(env, ctx, Math.floor(Date.now() / 1000));
     return;
   }
 
@@ -690,8 +676,4 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
   } else {
     console.log(`scheduled: processed ${settled.length} monitors at ${checkedAt}`);
   }
-
-  // Keep the public status snapshot fresh so the status page can load quickly.
-  // Best-effort: ignore errors so monitoring checks are not impacted.
-  scheduleSnapshotRefresh(env, ctx, Math.floor(Date.now() / 1000));
 }

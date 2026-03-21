@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/public/status', () => ({
-  computePublicStatusPayload: vi.fn(),
-}));
 vi.mock('../src/monitor/http', () => ({
   runHttpCheck: vi.fn(),
 }));
@@ -15,9 +12,6 @@ vi.mock('../src/scheduler/lock', () => ({
 vi.mock('../src/settings', () => ({
   readSettings: vi.fn(),
 }));
-vi.mock('../src/snapshots', () => ({
-  refreshPublicStatusSnapshot: vi.fn(),
-}));
 vi.mock('../src/notify/webhook', () => ({
   dispatchWebhookToChannels: vi.fn(),
 }));
@@ -26,11 +20,9 @@ import type { Env } from '../src/env';
 import { runHttpCheck } from '../src/monitor/http';
 import { runTcpCheck } from '../src/monitor/tcp';
 import { dispatchWebhookToChannels } from '../src/notify/webhook';
-import { computePublicStatusPayload } from '../src/public/status';
 import { runScheduledTick } from '../src/scheduler/scheduled';
 import { acquireLease } from '../src/scheduler/lock';
 import { readSettings } from '../src/settings';
-import { refreshPublicStatusSnapshot } from '../src/snapshots';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
 type CreateEnvOptions = {
@@ -136,7 +128,6 @@ describe('scheduler/scheduled regression', () => {
       admin_default_monitor_range: '24h',
       uptime_rating_level: 3,
     });
-    vi.mocked(refreshPublicStatusSnapshot).mockResolvedValue(undefined);
     vi.mocked(dispatchWebhookToChannels).mockResolvedValue(undefined);
     vi.mocked(runHttpCheck).mockResolvedValue({
       status: 'up',
@@ -152,9 +143,6 @@ describe('scheduler/scheduled regression', () => {
       error: null,
       attempts: 1,
     });
-    vi.mocked(computePublicStatusPayload).mockResolvedValue(
-      {} as Awaited<ReturnType<typeof computePublicStatusPayload>>,
-    );
   });
 
   afterEach(() => {
@@ -171,11 +159,10 @@ describe('scheduler/scheduled regression', () => {
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
     expect(readSettings).not.toHaveBeenCalled();
-    expect(refreshPublicStatusSnapshot).not.toHaveBeenCalled();
     expect(waitUntil).not.toHaveBeenCalled();
   });
 
-  it('still schedules snapshot refresh when no monitors are due', async () => {
+  it('returns without background work when no monitors are due', async () => {
     const env = createEnv({ dueRows: [] });
     const waitUntil = vi.fn();
     const expectedNow = Math.floor(Date.now() / 1000);
@@ -184,26 +171,7 @@ describe('scheduler/scheduled regression', () => {
 
     expect(acquireLease).toHaveBeenCalledWith(env.DB, 'scheduler:tick', expectedNow, 55);
     expect(readSettings).toHaveBeenCalledTimes(1);
-    expect(refreshPublicStatusSnapshot).toHaveBeenCalledTimes(1);
-    expect(waitUntil).toHaveBeenCalledTimes(1);
-    expect(computePublicStatusPayload).not.toHaveBeenCalled();
-
-    const refreshArgs = vi.mocked(refreshPublicStatusSnapshot).mock.calls[0]?.[0];
-    expect(refreshArgs).toBeDefined();
-    expect(refreshArgs?.db).toBe(env.DB);
-    expect(refreshArgs?.now).toBe(expectedNow);
-    expect(typeof refreshArgs?.compute).toBe('function');
-
-    if (!refreshArgs) {
-      throw new Error('Expected refreshPublicStatusSnapshot to receive arguments');
-    }
-
-    await refreshArgs.compute();
-    expect(computePublicStatusPayload).toHaveBeenCalledWith(env.DB, expectedNow);
-
-    const scheduledPromise = waitUntil.mock.calls[0]?.[0];
-    expect(scheduledPromise).toBeInstanceOf(Promise);
-    await expect(scheduledPromise as Promise<unknown>).resolves.toBeUndefined();
+    expect(waitUntil).not.toHaveBeenCalled();
   });
 
   it('processes due HTTP monitors and writes check/state rows', async () => {
@@ -272,10 +240,7 @@ describe('scheduler/scheduled regression', () => {
     expect(runArgs[stateUpsertIndex]?.[1]).toBe('up');
     expect(runArgs[stateUpsertIndex]?.[2]).toBe(expectedCheckedAt);
 
-    // Snapshot refresh still runs even when monitors are processed.
-    expect(waitUntil).toHaveBeenCalledTimes(1);
-    const refreshPromise = waitUntil.mock.calls[0]?.[0] as Promise<unknown>;
-    await expect(refreshPromise).resolves.toBeUndefined();
+    expect(waitUntil).not.toHaveBeenCalled();
   });
 
   it('sends monitor.down notification when status changes and monitor is not suppressed', async () => {
@@ -326,8 +291,7 @@ describe('scheduler/scheduled regression', () => {
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
-    // First waitUntil is monitor notification; second is snapshot refresh.
-    expect(waitUntil).toHaveBeenCalledTimes(2);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
     const notifyPromise = waitUntil.mock.calls[0]?.[0] as Promise<unknown>;
     await expect(notifyPromise).resolves.toBeUndefined();
 
@@ -452,7 +416,7 @@ describe('scheduler/scheduled regression', () => {
     const expectedCheckedAt = Math.floor(Math.floor(Date.now() / 1000) / 60) * 60;
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
-    expect(waitUntil).toHaveBeenCalledTimes(2);
+    expect(waitUntil).toHaveBeenCalledTimes(1);
     await expect(waitUntil.mock.calls[0]?.[0] as Promise<unknown>).resolves.toBeUndefined();
 
     expect(dispatchWebhookToChannels).toHaveBeenCalledWith(
@@ -570,8 +534,7 @@ describe('scheduler/scheduled regression', () => {
 
     await runScheduledTick(env, { waitUntil } as unknown as ExecutionContext);
 
-    // maintenance.started + maintenance.ended + snapshot refresh
-    expect(waitUntil).toHaveBeenCalledTimes(3);
+    expect(waitUntil).toHaveBeenCalledTimes(2);
     await Promise.all(waitUntil.mock.calls.map((c) => c[0] as Promise<unknown>));
 
     expect(dispatchWebhookToChannels).toHaveBeenCalledWith(
