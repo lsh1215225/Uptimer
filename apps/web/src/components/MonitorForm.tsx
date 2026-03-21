@@ -162,6 +162,19 @@ function parseExpectedStatusInput(
   return parseList(parts);
 }
 
+function parseOptionalSortOrderInput(
+  text: string,
+): { ok: true; value: number | undefined } | { ok: false } {
+  const trimmed = text.trim();
+  if (!trimmed) return { ok: true, value: undefined };
+  if (!/^-?\d+$/.test(trimmed)) return { ok: false };
+
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || n < -100000 || n > 100000) return { ok: false };
+
+  return { ok: true, value: n };
+}
+
 export function MonitorForm(props: CreateProps | EditProps) {
   const { t } = useI18n();
   const monitor = props.monitor;
@@ -177,7 +190,10 @@ export function MonitorForm(props: CreateProps | EditProps) {
 
   const [name, setName] = useState(monitor?.name ?? '');
   const [groupName, setGroupName] = useState(monitor?.group_name ?? '');
-  const [groupSortOrder, setGroupSortOrder] = useState(monitor?.group_sort_order ?? 0);
+  const [groupSortOrderInput, setGroupSortOrderInput] = useState(
+    monitor ? String(monitor.group_sort_order) : '',
+  );
+  const [groupSortOrderTouched, setGroupSortOrderTouched] = useState(false);
   const [sortOrder, setSortOrder] = useState(monitor?.sort_order ?? 0);
   const [showOnStatusPage, setShowOnStatusPage] = useState(monitor?.show_on_status_page ?? true);
   const [type, setType] = useState<MonitorType>(monitor?.type ?? 'http');
@@ -221,10 +237,15 @@ export function MonitorForm(props: CreateProps | EditProps) {
     () => parseExpectedStatusInput(expectedStatusInput, t),
     [expectedStatusInput, t],
   );
+  const groupSortOrderParse = useMemo(
+    () => parseOptionalSortOrderInput(groupSortOrderInput),
+    [groupSortOrderInput],
+  );
 
   const canSubmit =
     name.trim().length > 0 &&
     target.trim().length > 0 &&
+    groupSortOrderParse.ok &&
     (type !== 'http' || !showAdvancedHttp || (headersParse.ok && expectedStatusParse.ok));
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -235,7 +256,6 @@ export function MonitorForm(props: CreateProps | EditProps) {
     const base = {
       name: name.trim(),
       target: target.trim(),
-      group_sort_order: groupSortOrder,
       sort_order: sortOrder,
       show_on_status_page: showOnStatusPage,
       interval_sec: intervalSec,
@@ -247,6 +267,9 @@ export function MonitorForm(props: CreateProps | EditProps) {
         ...base,
         group_name: normalizedGroupName.length > 0 ? normalizedGroupName : null,
       };
+      if (groupSortOrderTouched && groupSortOrderParse.ok && groupSortOrderParse.value !== undefined) {
+        data.group_sort_order = groupSortOrderParse.value;
+      }
 
       if (type === 'http') {
         data.http_method = httpMethod;
@@ -281,6 +304,9 @@ export function MonitorForm(props: CreateProps | EditProps) {
 
     const data: CreateMonitorInput = { ...base, type };
     if (normalizedGroupName.length > 0) data.group_name = normalizedGroupName;
+    if (groupSortOrderParse.ok && groupSortOrderParse.value !== undefined) {
+      data.group_sort_order = groupSortOrderParse.value;
+    }
 
     if (type === 'http') {
       data.http_method = httpMethod;
@@ -359,10 +385,10 @@ export function MonitorForm(props: CreateProps | EditProps) {
           <label className={labelClass}>{t('monitor_form.group_order')}</label>
           <input
             type="number"
-            value={groupSortOrder}
+            value={groupSortOrderInput}
             onChange={(e) => {
-              const n = Number.parseInt(e.target.value, 10);
-              setGroupSortOrder(Number.isFinite(n) ? n : 0);
+              setGroupSortOrderInput(e.target.value);
+              setGroupSortOrderTouched(true);
             }}
             min={-100000}
             max={100000}
