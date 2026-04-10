@@ -20,16 +20,8 @@ import type { Env } from '../env';
 import { requireAdmin } from '../middleware/auth';
 import { AppError } from '../middleware/errors';
 import { requireAdminRateLimit } from '../middleware/rate-limit';
-import {
-  buildPublicHomepagePayloadFromState,
-  buildPublicHomepageState,
-  serializePublicHomepageState,
-} from '../public/homepage';
-import {
-  listVisibleActiveIncidents,
-  listVisibleMaintenanceWindows,
-} from '../public/data';
-import { refreshPublicHomepageStateAndArtifactIfNeeded } from '../snapshots';
+import { computePublicHomepagePayload } from '../public/homepage';
+import { refreshPublicHomepageSnapshotIfNeeded } from '../snapshots';
 import { runHttpCheck } from '../monitor/http';
 import {
   validateHttpResponseAssertionConfig,
@@ -88,31 +80,10 @@ adminRoutes.route('/settings', adminSettingsRoutes);
 function queuePublicHomepageSnapshotRefresh(c: { env: Env; executionCtx: ExecutionContext }) {
   const now = Math.floor(Date.now() / 1000);
   c.executionCtx.waitUntil(
-    refreshPublicHomepageStateAndArtifactIfNeeded({
+    refreshPublicHomepageSnapshotIfNeeded({
       db: c.env.DB,
       now,
-      compute: async () => {
-        const refreshNow = Math.floor(Date.now() / 1000);
-        const includeHiddenMonitors = false;
-        const [state, activeIncidents, maintenanceWindows] = await Promise.all([
-          buildPublicHomepageState(c.env.DB, refreshNow),
-          listVisibleActiveIncidents(c.env.DB, includeHiddenMonitors),
-          listVisibleMaintenanceWindows(c.env.DB, refreshNow, includeHiddenMonitors),
-        ]);
-        const artifactPayload = buildPublicHomepagePayloadFromState({
-          state,
-          now: refreshNow,
-          activeIncidents,
-          maintenanceWindows,
-          monitorLimit: 12,
-        });
-
-        return {
-          stateGeneratedAt: state.generated_at,
-          stateBodyJson: serializePublicHomepageState(state),
-          artifactPayload,
-        };
-      },
+      compute: () => computePublicHomepagePayload(c.env.DB, Math.floor(Date.now() / 1000)),
     }).catch((err) => {
       console.warn('homepage snapshot: refresh failed', err);
     }),

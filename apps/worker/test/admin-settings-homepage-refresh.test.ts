@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/snapshots', () => ({
-  refreshPublicHomepageStateAndArtifactIfNeeded: vi.fn(),
+  refreshPublicHomepageSnapshotIfNeeded: vi.fn(),
 }));
 
 import type { Env } from '../src/env';
 import { adminSettingsRoutes } from '../src/routes/admin-settings';
-import { refreshPublicHomepageStateAndArtifactIfNeeded } from '../src/snapshots';
+import { refreshPublicHomepageSnapshotIfNeeded } from '../src/snapshots';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
 describe('admin settings homepage snapshot refresh', () => {
@@ -46,7 +46,7 @@ describe('admin settings homepage snapshot refresh', () => {
       },
     ];
 
-    vi.mocked(refreshPublicHomepageStateAndArtifactIfNeeded).mockResolvedValue(false);
+    vi.mocked(refreshPublicHomepageSnapshotIfNeeded).mockResolvedValue(false);
 
     const env = {
       DB: createFakeD1Database(handlers),
@@ -71,6 +71,6 @@ describe('admin settings homepage snapshot refresh', () => {
     });
     expect(waitUntil).toHaveBeenCalledTimes(1);
     await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
-    expect(refreshPublicHomepageStateAndArtifactIfNeeded).toHaveBeenCalledTimes(1);
+    expect(refreshPublicHomepageSnapshotIfNeeded).toHaveBeenCalledTimes(1);
   });
 });

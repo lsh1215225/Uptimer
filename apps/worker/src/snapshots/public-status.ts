@@ -3,7 +3,6 @@ import { publicStatusResponseSchema, type PublicStatusResponse } from '../schema
 
 const SNAPSHOT_KEY = 'status';
 const MAX_AGE_SECONDS = 60;
-const MAX_STALE_SECONDS = 10 * 60;
 
 export function getSnapshotKey() {
   return SNAPSHOT_KEY;
@@ -23,36 +22,21 @@ function safeJsonParse(text: string): unknown | null {
   }
 }
 
-function looksLikeSerializedStatusPayload(text: string): boolean {
-  const trimmed = text.trim();
-  return (
-    trimmed.startsWith('{"generated_at":') &&
-    trimmed.includes('"summary"') &&
-    trimmed.includes('"monitors"')
-  );
-}
-
-async function readStatusSnapshotRow(
-  db: D1Database,
-): Promise<{ generated_at: number; body_json: string } | null> {
-  return db
-    .prepare(
-      `
-      SELECT generated_at, body_json
-      FROM public_snapshots
-      WHERE key = ?1
-    `,
-    )
-    .bind(SNAPSHOT_KEY)
-    .first<{ generated_at: number; body_json: string }>();
-}
-
 export async function readStatusSnapshot(
   db: D1Database,
   now: number,
 ): Promise<{ data: PublicStatusResponse; age: number } | null> {
   try {
-    const row = await readStatusSnapshotRow(db);
+    const row = await db
+      .prepare(
+        `
+        SELECT generated_at, body_json
+        FROM public_snapshots
+        WHERE key = ?1
+      `,
+      )
+      .bind(SNAPSHOT_KEY)
+      .first<{ generated_at: number; body_json: string }>();
 
     if (!row) return null;
 
@@ -70,72 +54,13 @@ export async function readStatusSnapshot(
   }
 }
 
-export async function readStatusSnapshotJson(
+export async function writeStatusSnapshot(
   db: D1Database,
   now: number,
-): Promise<{ bodyJson: string; age: number } | null> {
-  try {
-    const row = await readStatusSnapshotRow(db);
-    if (!row) return null;
-
-    const age = Math.max(0, now - row.generated_at);
-    if (age > MAX_AGE_SECONDS) return null;
-
-    if (looksLikeSerializedStatusPayload(row.body_json)) {
-      return {
-        bodyJson: row.body_json,
-        age,
-      };
-    }
-
-    const parsed = safeJsonParse(row.body_json);
-    const data = publicStatusResponseSchema.parse(parsed);
-    return {
-      bodyJson: JSON.stringify(data),
-      age,
-    };
-  } catch (err) {
-    console.warn('public snapshot: read failed, falling back to live', err);
-    return null;
-  }
-}
-
-export async function readStaleStatusSnapshotJson(
-  db: D1Database,
-  now: number,
-): Promise<{ bodyJson: string; age: number } | null> {
-  try {
-    const row = await readStatusSnapshotRow(db);
-    if (!row) return null;
-
-    const age = Math.max(0, now - row.generated_at);
-    if (age > MAX_STALE_SECONDS) return null;
-
-    if (looksLikeSerializedStatusPayload(row.body_json)) {
-      return {
-        bodyJson: row.body_json,
-        age,
-      };
-    }
-
-    const parsed = safeJsonParse(row.body_json);
-    const data = publicStatusResponseSchema.parse(parsed);
-    return {
-      bodyJson: JSON.stringify(data),
-      age,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function statusSnapshotUpsertStatement(
-  db: D1Database,
-  generatedAt: number,
-  bodyJson: string,
-  now: number,
-): D1PreparedStatement {
-  return db
+  payload: PublicStatusResponse,
+): Promise<void> {
+  const bodyJson = JSON.stringify(payload);
+  await db
     .prepare(
       `
       INSERT INTO public_snapshots (key, generated_at, body_json, updated_at)
@@ -146,33 +71,21 @@ function statusSnapshotUpsertStatement(
         updated_at = excluded.updated_at
     `,
     )
-    .bind(SNAPSHOT_KEY, generatedAt, bodyJson, now);
-}
-
-export async function writeStatusSnapshot(
-  db: D1Database,
-  now: number,
-  payload: PublicStatusResponse,
-): Promise<void> {
-  const bodyJson = JSON.stringify(payload);
-  await writeStatusSnapshotJson(db, now, payload.generated_at, bodyJson);
-}
-
-export async function writeStatusSnapshotJson(
-  db: D1Database,
-  now: number,
-  generatedAt: number,
-  bodyJson: string,
-): Promise<void> {
-  await statusSnapshotUpsertStatement(db, generatedAt, bodyJson, now).run();
+    .bind(SNAPSHOT_KEY, payload.generated_at, bodyJson, now)
+    .run();
 }
 
 export function applyStatusCacheHeaders(res: Response, ageSeconds: number): void {
+  // Guarantee freshness bound <= 60s. Prefer <= 30s in normal cases.
+  //
+  // We ensure (max-age + stale-*) never exceeds MAX_AGE_SECONDS.
   const remaining = Math.max(0, MAX_AGE_SECONDS - ageSeconds);
+  const maxAge = Math.min(30, remaining);
+  const stale = Math.max(0, remaining - maxAge);
 
   res.headers.set(
     'Cache-Control',
-    `public, max-age=${remaining}, stale-while-revalidate=0, stale-if-error=0`,
+    `public, max-age=${maxAge}, stale-while-revalidate=${stale}, stale-if-error=${stale}`,
   );
 }
 

@@ -7,11 +7,8 @@ import {
 
 const SNAPSHOT_KEY = 'homepage';
 const SNAPSHOT_ARTIFACT_KEY = 'homepage:artifact';
-const SNAPSHOT_STATE_KEY = 'homepage:state';
-const SNAPSHOT_ACCESS_KEY = 'homepage:access';
 const MAX_AGE_SECONDS = 60;
 const MAX_STALE_SECONDS = 10 * 60;
-const ACCESS_MAX_AGE_SECONDS = 2 * 60;
 const REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
 const MAX_BOOTSTRAP_MONITORS = 12;
 
@@ -444,29 +441,8 @@ async function readHomepageArtifactSnapshotRow(db: D1Database) {
   return readSnapshotRow(db, SNAPSHOT_ARTIFACT_KEY);
 }
 
-async function readHomepageStateSnapshotRow(db: D1Database) {
-  return readSnapshotRow(db, SNAPSHOT_STATE_KEY);
-}
-
-async function readHomepageAccessSnapshotRow(db: D1Database) {
-  return readSnapshotRow(db, SNAPSHOT_ACCESS_KEY);
-}
-
 function isSameMinute(a: number, b: number): boolean {
   return Math.floor(a / 60) === Math.floor(b / 60);
-}
-
-function isSnapshotPairFreshForMinute(opts: {
-  dataGeneratedAt: number | null;
-  artifactGeneratedAt: number | null;
-  now: number;
-}): boolean {
-  return (
-    opts.dataGeneratedAt !== null &&
-    isSameMinute(opts.dataGeneratedAt, opts.now) &&
-    opts.artifactGeneratedAt !== null &&
-    isSameMinute(opts.artifactGeneratedAt, opts.now)
-  );
 }
 
 export function getHomepageSnapshotKey() {
@@ -723,40 +699,6 @@ export async function readHomepageArtifactSnapshotGeneratedAt(
   return row?.generated_at ?? null;
 }
 
-export async function readHomepageStateSnapshotJson(
-  db: D1Database,
-): Promise<{ generatedAt: number; bodyJson: string } | null> {
-  const row = await readHomepageStateSnapshotRow(db);
-  if (!row) return null;
-  return {
-    generatedAt: row.generated_at,
-    bodyJson: row.body_json,
-  };
-}
-
-export async function markHomepageAccessIfNeeded(
-  db: D1Database,
-  now: number,
-): Promise<boolean> {
-  const generatedAt = (await readHomepageAccessSnapshotRow(db))?.generated_at ?? null;
-  if (generatedAt !== null && isSameMinute(generatedAt, now)) {
-    return false;
-  }
-
-  await homepageSnapshotUpsertStatement(db, SNAPSHOT_ACCESS_KEY, now, '{}', now).run();
-  return true;
-}
-
-export async function wasHomepageRecentlyAccessed(
-  db: D1Database,
-  now: number,
-  maxAgeSeconds = ACCESS_MAX_AGE_SECONDS,
-): Promise<boolean> {
-  const row = await readHomepageAccessSnapshotRow(db);
-  if (!row) return false;
-  return Math.max(0, now - row.generated_at) <= maxAgeSeconds;
-}
-
 function homepageSnapshotUpsertStatement(
   db: D1Database,
   key: string,
@@ -799,31 +741,6 @@ export async function writeHomepageSnapshot(
   ]);
 }
 
-export async function writeHomepageDataSnapshot(
-  db: D1Database,
-  now: number,
-  payload: PublicHomepageResponse,
-): Promise<void> {
-  const dataBodyJson = JSON.stringify(payload);
-
-  await writeHomepageDataSnapshotJson(db, now, payload.generated_at, dataBodyJson);
-}
-
-export async function writeHomepageDataSnapshotJson(
-  db: D1Database,
-  now: number,
-  generatedAt: number,
-  bodyJson: string,
-): Promise<void> {
-  await homepageSnapshotUpsertStatement(
-    db,
-    SNAPSHOT_KEY,
-    generatedAt,
-    bodyJson,
-    now,
-  ).run();
-}
-
 export async function writeHomepageArtifactSnapshot(
   db: D1Database,
   now: number,
@@ -841,55 +758,14 @@ export async function writeHomepageArtifactSnapshot(
   ).run();
 }
 
-export async function writeHomepageStateSnapshotJson(
-  db: D1Database,
-  now: number,
-  generatedAt: number,
-  bodyJson: string,
-): Promise<void> {
-  await homepageSnapshotUpsertStatement(
-    db,
-    SNAPSHOT_STATE_KEY,
-    generatedAt,
-    bodyJson,
-    now,
-  ).run();
-}
-
-export async function writeHomepageStateAndArtifactJson(opts: {
-  db: D1Database;
-  now: number;
-  stateGeneratedAt: number;
-  stateBodyJson: string;
-  artifactPayload: PublicHomepageResponse;
-}): Promise<void> {
-  const render = buildHomepageRenderArtifact(opts.artifactPayload);
-  const renderBodyJson = JSON.stringify(render);
-
-  await opts.db.batch([
-    homepageSnapshotUpsertStatement(
-      opts.db,
-      SNAPSHOT_STATE_KEY,
-      opts.stateGeneratedAt,
-      opts.stateBodyJson,
-      opts.now,
-    ),
-    homepageSnapshotUpsertStatement(
-      opts.db,
-      SNAPSHOT_ARTIFACT_KEY,
-      render.generated_at,
-      renderBodyJson,
-      opts.now,
-    ),
-  ]);
-}
-
 export function applyHomepageCacheHeaders(res: Response, ageSeconds: number): void {
   const remaining = Math.max(0, MAX_AGE_SECONDS - ageSeconds);
+  const maxAge = Math.min(30, remaining);
+  const stale = Math.max(0, remaining - maxAge);
 
   res.headers.set(
     'Cache-Control',
-    `public, max-age=${remaining}, stale-while-revalidate=0, stale-if-error=0`,
+    `public, max-age=${maxAge}, stale-while-revalidate=${stale}, stale-if-error=${stale}`,
   );
 }
 
@@ -924,11 +800,8 @@ export async function refreshPublicHomepageSnapshotIfNeeded(opts: {
   now: number;
   compute: () => Promise<unknown>;
 }): Promise<boolean> {
-  const [dataGeneratedAt, artifactGeneratedAt] = await Promise.all([
-    readHomepageSnapshotGeneratedAt(opts.db),
-    readHomepageArtifactSnapshotGeneratedAt(opts.db),
-  ]);
-  if (isSnapshotPairFreshForMinute({ dataGeneratedAt, artifactGeneratedAt, now: opts.now })) {
+  const generatedAt = await readHomepageSnapshotGeneratedAt(opts.db);
+  if (generatedAt !== null && isSameMinute(generatedAt, opts.now)) {
     return false;
   }
 
@@ -937,17 +810,8 @@ export async function refreshPublicHomepageSnapshotIfNeeded(opts: {
     return false;
   }
 
-  const [latestDataGeneratedAt, latestArtifactGeneratedAt] = await Promise.all([
-    readHomepageSnapshotGeneratedAt(opts.db),
-    readHomepageArtifactSnapshotGeneratedAt(opts.db),
-  ]);
-  if (
-    isSnapshotPairFreshForMinute({
-      dataGeneratedAt: latestDataGeneratedAt,
-      artifactGeneratedAt: latestArtifactGeneratedAt,
-      now: opts.now,
-    })
-  ) {
+  const latestGeneratedAt = await readHomepageSnapshotGeneratedAt(opts.db);
+  if (latestGeneratedAt !== null && isSameMinute(latestGeneratedAt, opts.now)) {
     return false;
   }
 
@@ -976,56 +840,5 @@ export async function refreshPublicHomepageArtifactSnapshotIfNeeded(opts: {
   }
 
   await refreshPublicHomepageArtifactSnapshot(opts);
-  return true;
-}
-
-export async function refreshPublicHomepageStateAndArtifactIfNeeded(opts: {
-  db: D1Database;
-  now: number;
-  compute: () => Promise<{
-    stateGeneratedAt: number;
-    stateBodyJson: string;
-    artifactPayload: PublicHomepageResponse;
-  }>;
-}): Promise<boolean> {
-  const [stateSnapshot, artifactGeneratedAt] = await Promise.all([
-    readHomepageStateSnapshotJson(opts.db),
-    readHomepageArtifactSnapshotGeneratedAt(opts.db),
-  ]);
-  if (
-    stateSnapshot &&
-    isSameMinute(stateSnapshot.generatedAt, opts.now) &&
-    artifactGeneratedAt !== null &&
-    isSameMinute(artifactGeneratedAt, opts.now)
-  ) {
-    return false;
-  }
-
-  const acquired = await acquireLease(opts.db, REFRESH_LOCK_NAME, opts.now, 55);
-  if (!acquired) {
-    return false;
-  }
-
-  const [latestStateSnapshot, latestArtifactGeneratedAt] = await Promise.all([
-    readHomepageStateSnapshotJson(opts.db),
-    readHomepageArtifactSnapshotGeneratedAt(opts.db),
-  ]);
-  if (
-    latestStateSnapshot &&
-    isSameMinute(latestStateSnapshot.generatedAt, opts.now) &&
-    latestArtifactGeneratedAt !== null &&
-    isSameMinute(latestArtifactGeneratedAt, opts.now)
-  ) {
-    return false;
-  }
-
-  const computed = await opts.compute();
-  await writeHomepageStateAndArtifactJson({
-    db: opts.db,
-    now: opts.now,
-    stateGeneratedAt: computed.stateGeneratedAt,
-    stateBodyJson: computed.stateBodyJson,
-    artifactPayload: computed.artifactPayload,
-  });
   return true;
 }

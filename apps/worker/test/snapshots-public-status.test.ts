@@ -6,11 +6,8 @@ import {
   getSnapshotKey,
   getSnapshotMaxAgeSeconds,
   readStatusSnapshot,
-  readStatusSnapshotJson,
-  readStaleStatusSnapshotJson,
   toSnapshotPayload,
   writeStatusSnapshot,
-  writeStatusSnapshotJson,
 } from '../src/snapshots/public-status';
 import { createFakeD1Database } from './helpers/fake-d1';
 
@@ -93,30 +90,6 @@ describe('snapshots/public-status', () => {
     warn.mockRestore();
   });
 
-  it('reads fresh and bounded-stale snapshot JSON without reparsing the hot path', async () => {
-    const now = 200;
-    const payload = samplePayload(190);
-    const bodyJson = JSON.stringify(payload);
-    const db = createFakeD1Database([
-      {
-        match: 'from public_snapshots',
-        first: () => ({
-          generated_at: payload.generated_at,
-          body_json: bodyJson,
-        }),
-      },
-    ]);
-
-    await expect(readStatusSnapshotJson(db, now)).resolves.toEqual({
-      bodyJson,
-      age: 10,
-    });
-    await expect(readStaleStatusSnapshotJson(db, now)).resolves.toEqual({
-      bodyJson,
-      age: 10,
-    });
-  });
-
   it('writes the normalized snapshot payload with upsert semantics', async () => {
     let boundArgs: unknown[] | null = null;
     const db = createFakeD1Database([
@@ -136,31 +109,11 @@ describe('snapshots/public-status', () => {
     expect(boundArgs).toEqual(['status', 280, JSON.stringify(payload), now]);
   });
 
-  it('writes pre-serialized snapshot JSON without extra normalization work', async () => {
-    let boundArgs: unknown[] | null = null;
-    const db = createFakeD1Database([
-      {
-        match: 'insert into public_snapshots',
-        run: (args) => {
-          boundArgs = args;
-          return { meta: { changes: 1 } };
-        },
-      },
-    ]);
-
-    const now = 300;
-    const payload = samplePayload(280);
-    const bodyJson = JSON.stringify(payload);
-    await writeStatusSnapshotJson(db, now, payload.generated_at, bodyJson);
-
-    expect(boundArgs).toEqual(['status', 280, bodyJson, now]);
-  });
-
   it('sets bounded cache-control headers based on current snapshot age', () => {
     const young = new Response('ok');
     applyStatusCacheHeaders(young, 10);
     expect(young.headers.get('Cache-Control')).toBe(
-      'public, max-age=50, stale-while-revalidate=0, stale-if-error=0',
+      'public, max-age=30, stale-while-revalidate=20, stale-if-error=20',
     );
 
     const tooOld = new Response('ok');
