@@ -10,6 +10,8 @@ vi.mock('../src/monitor/tcp', () => ({
 
 import type { Env } from '../src/env';
 import { handleError, handleNotFound } from '../src/middleware/errors';
+import { serializePublicMonitorCache } from '../src/public/monitor-cache';
+import { serializePublicHomepageState } from '../src/public/homepage';
 import worker from '../src/index';
 import { publicRoutes } from '../src/routes/public';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
@@ -181,6 +183,86 @@ describe('public homepage route', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(payload);
+  });
+
+  it('skips a fresh homepage row when the homepage state snapshot is newer', async () => {
+    const now = 1_728_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+
+    const res = await requestHomepage([
+      {
+        match: 'from public_snapshots',
+        first: (args) => {
+          if (args[0] === 'homepage') {
+            return {
+              generated_at: now - 60,
+              body_json: JSON.stringify(samplePayload(now - 60)),
+            };
+          }
+          if (args[0] === 'homepage:state') {
+            return {
+              generated_at: now,
+              body_json: serializePublicHomepageState({
+                generated_at: now,
+                monitor_count_total: 1,
+                site_title: 'Status Hub',
+                site_description: 'Production services',
+                site_locale: 'en',
+                site_timezone: 'UTC',
+                uptime_rating_level: 4,
+                monitors: [
+                  {
+                    id: 1,
+                    name: 'API',
+                    type: 'http',
+                    group_name: 'Core',
+                    interval_sec: 60,
+                    created_at: now - 40 * 86_400,
+                    state_status: 'up',
+                    last_checked_at: now - 30,
+                    covered_until_at: now,
+                    cache: JSON.parse(
+                      serializePublicMonitorCache({
+                        heartbeat: {
+                          checked_at: [now - 60],
+                          status_codes: 'u',
+                          latency_ms: [42],
+                        },
+                        uptime_days: {
+                          day_start_at: [now - 86_400],
+                          total_sec: [86_400],
+                          downtime_sec: [0],
+                          unknown_sec: [0],
+                          uptime_sec: [86_400],
+                        },
+                      }),
+                    ),
+                  },
+                ],
+                resolved_incident_preview: null,
+                maintenance_history_preview: null,
+              }),
+            };
+          }
+          return null;
+        },
+      },
+      {
+        match: 'from incidents',
+        all: () => [],
+      },
+      {
+        match: 'from maintenance_windows',
+        all: () => [],
+      },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      generated_at: now,
+      monitor_count_total: 1,
+      monitors: [{ id: 1 }],
+    });
   });
 
   it('serves homepage render artifacts from the artifact snapshot row', async () => {
@@ -359,6 +441,106 @@ describe('public homepage route', () => {
     expect(res.headers.get('Cache-Control')).toBe(
       'public, max-age=0, stale-while-revalidate=0, stale-if-error=0',
     );
+  });
+
+  it('materializes homepage data from the homepage state snapshot before falling back to live compute', async () => {
+    const now = 1_728_000_000;
+    const writtenArgs: unknown[][] = [];
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+
+    const { res, waitUntil } = await requestHomepageWithWaitUntil(
+      [
+        {
+          match: 'from public_snapshots',
+          first: (args) => {
+            if (args[0] === 'homepage') {
+              return null;
+            }
+            if (args[0] === 'homepage:state') {
+              return {
+                generated_at: now - 60,
+                body_json: serializePublicHomepageState({
+                  generated_at: now - 60,
+                  monitor_count_total: 1,
+                  site_title: 'Status Hub',
+                  site_description: 'Production services',
+                  site_locale: 'en',
+                  site_timezone: 'UTC',
+                  uptime_rating_level: 4,
+                  monitors: [
+                    {
+                      id: 1,
+                      name: 'API',
+                      type: 'http',
+                      group_name: 'Core',
+                      interval_sec: 60,
+                      created_at: now - 40 * 86_400,
+                      state_status: 'up',
+                      last_checked_at: now - 30,
+                      covered_until_at: now - 60,
+                      cache: JSON.parse(
+                        serializePublicMonitorCache({
+                          heartbeat: {
+                            checked_at: [now - 60],
+                            status_codes: 'u',
+                            latency_ms: [42],
+                          },
+                          uptime_days: {
+                            day_start_at: [now - 86_400],
+                            total_sec: [86_400],
+                            downtime_sec: [0],
+                            unknown_sec: [0],
+                            uptime_sec: [86_400],
+                          },
+                        }),
+                      ),
+                    },
+                  ],
+                  resolved_incident_preview: null,
+                  maintenance_history_preview: null,
+                }),
+              };
+            }
+            return null;
+          },
+        },
+        {
+          match: 'from incidents',
+          all: () => [],
+        },
+        {
+          match: 'from maintenance_windows',
+          all: () => [],
+        },
+        {
+          match: 'insert into public_snapshots',
+          run: (args) => {
+            writtenArgs.push(args);
+            return { meta: { changes: 1 } };
+          },
+        },
+      ],
+      vi.fn((promise) => promise),
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      generated_at: now,
+      monitor_count_total: 1,
+      monitors: [
+        {
+          id: 1,
+          heartbeat_strip: {
+            checked_at: [now - 60],
+            status_codes: 'u',
+            latency_ms: [42],
+          },
+        },
+      ],
+    });
+    expect(waitUntil.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
+    expect(writtenArgs.filter((args) => args[0] === 'homepage')).toHaveLength(1);
   });
 
   it('falls back to the fresh public status snapshot when the full homepage snapshot is missing', async () => {

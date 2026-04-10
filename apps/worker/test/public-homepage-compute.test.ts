@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { computePublicHomepagePayload } from '../src/public/homepage';
+import {
+  buildPublicHomepagePayloadFromState,
+  computePublicHomepagePayload,
+  type PublicHomepageState,
+} from '../src/public/homepage';
+import { serializePublicMonitorCache } from '../src/public/monitor-cache';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
 
 describe('computePublicHomepagePayload', () => {
@@ -128,5 +133,68 @@ describe('computePublicHomepagePayload', () => {
       },
     });
     expect(payload.monitors[0]?.uptime_30d?.uptime_pct).toBeCloseTo(99.965, 3);
+  });
+
+  it('materializes homepage payloads from cached homepage state', async () => {
+    const now = 1_728_000_000;
+    const state: PublicHomepageState = {
+      generated_at: now - 30,
+      monitor_count_total: 1,
+      site_title: 'Status Hub',
+      site_description: 'Production services',
+      site_locale: 'en',
+      site_timezone: 'UTC',
+      uptime_rating_level: 4,
+      monitors: [
+        {
+          id: 1,
+          name: 'API',
+          type: 'http',
+          group_name: 'Core',
+          interval_sec: 60,
+          created_at: now - 40 * 86_400,
+          state_status: 'up',
+          last_checked_at: now - 30,
+          covered_until_at: now - 30,
+          cache: JSON.parse(
+            serializePublicMonitorCache({
+              heartbeat: {
+                checked_at: [now - 60, now - 120],
+                status_codes: 'ud',
+                latency_ms: [42, null],
+              },
+              uptime_days: {
+                day_start_at: [now - 2 * 86_400, now - 86_400],
+                total_sec: [86_400, 86_400],
+                downtime_sec: [0, 60],
+                unknown_sec: [0, 0],
+                uptime_sec: [86_400, 86_340],
+              },
+            }),
+          ),
+        },
+      ],
+      resolved_incident_preview: null,
+      maintenance_history_preview: null,
+    };
+
+    const payload = buildPublicHomepagePayloadFromState({
+      state,
+      now,
+      activeIncidents: [],
+      maintenanceWindows: { active: [], upcoming: [] },
+    });
+
+    expect(payload.monitors[0]).toMatchObject({
+      heartbeat_strip: {
+        checked_at: [now - 60, now - 120],
+        status_codes: 'ud',
+        latency_ms: [42, null],
+      },
+      uptime_day_strip: {
+        day_start_at: [now - 2 * 86_400, now - 86_400],
+      },
+    });
+    expect(payload.monitors[0]?.uptime_30d?.uptime_pct).toBeGreaterThan(99.9);
   });
 });

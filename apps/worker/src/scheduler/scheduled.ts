@@ -22,19 +22,35 @@ import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
 import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
 import {
+  advancePublicHomepageStateCoverageInPlace,
+  buildPublicHomepagePayloadFromState,
+  buildPublicHomepageState,
   computePublicHomepageArtifactPayload,
-  computePublicHomepagePayload,
+  parsePublicHomepageState,
+  serializePublicHomepageState,
+  type PublicHomepageState,
 } from '../public/homepage';
 import {
+  listVisibleActiveIncidents,
+  listVisibleMaintenanceWindows,
+} from '../public/data';
+import {
+  advancePublicMonitorCacheCoverageInPlace,
+  appendHeartbeatToPublicMonitorCacheInPlace,
+} from '../public/monitor-cache';
+import {
+  readHomepageArtifactSnapshotGeneratedAt,
+  readHomepageStateSnapshotJson,
   refreshPublicHomepageArtifactSnapshotIfNeeded,
-  refreshPublicHomepageSnapshotIfNeeded,
   wasHomepageRecentlyAccessed,
+  writeHomepageStateAndArtifactJson,
 } from '../snapshots';
 import { readSettings } from '../settings';
 import { acquireLease } from './lock';
 
 const LOCK_NAME = 'scheduler:tick';
 const LOCK_LEASE_SECONDS = 55;
+const HOMEPAGE_REFRESH_LOCK_NAME = 'snapshot:homepage:refresh';
 
 const CHECK_CONCURRENCY = 5;
 const PERSIST_BATCH_SIZE = 25;
@@ -47,6 +63,7 @@ type DueMonitorRow = {
   name: string;
   type: string;
   target: string;
+  show_on_status_page: number;
   interval_sec: number;
   timeout_ms: number;
   http_method: string | null;
@@ -264,6 +281,23 @@ function toMonitorStatus(value: string | null): MonitorStatus | null {
   }
 }
 
+function isSameMinute(a: number, b: number): boolean {
+  return Math.floor(a / 60) === Math.floor(b / 60);
+}
+
+function isHomepageStateAndArtifactFreshForMinute(opts: {
+  stateGeneratedAt: number | null;
+  artifactGeneratedAt: number | null;
+  now: number;
+}): boolean {
+  return (
+    opts.stateGeneratedAt !== null &&
+    isSameMinute(opts.stateGeneratedAt, opts.now) &&
+    opts.artifactGeneratedAt !== null &&
+    isSameMinute(opts.artifactGeneratedAt, opts.now)
+  );
+}
+
 async function listDueMonitors(db: D1Database, checkedAt: number): Promise<DueMonitorRow[]> {
   const { results } = await db
     .prepare(
@@ -273,6 +307,7 @@ async function listDueMonitors(db: D1Database, checkedAt: number): Promise<DueMo
         m.name,
         m.type,
         m.target,
+        m.show_on_status_page,
         m.interval_sec,
         m.timeout_ms,
         m.http_method,
@@ -535,6 +570,106 @@ async function persistCompletedMonitors(
   }
 }
 
+function applyCompletedMonitorToHomepageState(
+  state: PublicHomepageState,
+  monitorIndexById: ReadonlyMap<number, number>,
+  completed: CompletedDueMonitor,
+): boolean {
+  const monitorIndex = monitorIndexById.get(completed.row.id);
+  if (monitorIndex === undefined) {
+    return completed.row.show_on_status_page !== 1;
+  }
+
+  const monitor = state.monitors[monitorIndex];
+  if (!monitor) {
+    return false;
+  }
+
+  if (monitor.covered_until_at < completed.checkedAt) {
+    advancePublicMonitorCacheCoverageInPlace(monitor.cache, {
+      status: monitor.state_status,
+      checkedAt: monitor.last_checked_at ?? 0,
+      intervalSec: monitor.interval_sec,
+      createdAt: monitor.created_at,
+      from: monitor.covered_until_at,
+      to: completed.checkedAt,
+    });
+  }
+
+  monitor.state_status = completed.next.status;
+  monitor.last_checked_at = completed.checkedAt;
+  monitor.covered_until_at = completed.checkedAt;
+  appendHeartbeatToPublicMonitorCacheInPlace(monitor.cache, {
+    checkedAt: completed.checkedAt,
+    status: completed.outcome.status,
+    latencyMs: completed.outcome.latencyMs,
+  });
+
+  return true;
+}
+
+async function refreshHomepageStateAndArtifactFromState(opts: {
+  db: D1Database;
+  now: number;
+  completed: CompletedDueMonitor[];
+  storedState?: { generatedAt: number; bodyJson: string } | null;
+}): Promise<boolean> {
+  let parsed: PublicHomepageState | null = null;
+  const stored = opts.storedState ?? (await readHomepageStateSnapshotJson(opts.db));
+  if (stored) {
+    try {
+      parsed = parsePublicHomepageState(JSON.parse(stored.bodyJson) as unknown);
+    } catch {
+      parsed = null;
+    }
+  }
+
+  const state = parsed;
+  if (!state) {
+    return false;
+  }
+
+  const monitorIndexById = new Map<number, number>();
+  for (let index = 0; index < state.monitors.length; index += 1) {
+    const monitor = state.monitors[index];
+    if (!monitor) continue;
+    monitorIndexById.set(monitor.id, index);
+  }
+
+  for (const completed of opts.completed) {
+    if (!applyCompletedMonitorToHomepageState(state, monitorIndexById, completed)) {
+      return false;
+    }
+  }
+
+  advancePublicHomepageStateCoverageInPlace(state, opts.now);
+
+  const includeHiddenMonitors = false;
+  const [activeIncidents, maintenanceWindows] = await Promise.all([
+    listVisibleActiveIncidents(opts.db, includeHiddenMonitors),
+    listVisibleMaintenanceWindows(opts.db, opts.now, includeHiddenMonitors),
+  ]);
+
+  const artifactPayload = buildPublicHomepagePayloadFromState({
+    state,
+    now: opts.now,
+    activeIncidents,
+    maintenanceWindows,
+    monitorLimit: 12,
+  });
+  const stateBodyJson = serializePublicHomepageState(state);
+
+  await writeHomepageStateAndArtifactJson({
+    db: opts.db,
+    now: opts.now,
+    stateGeneratedAt: state.generated_at,
+    stateBodyJson,
+    artifactPayload,
+  });
+
+  return true;
+}
+
 function queueMonitorNotification(
   env: Env,
   notify: NotifyContext | null,
@@ -598,23 +733,90 @@ function queueMonitorNotification(
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
-  const queueHomepageRefresh = async () => {
-    const refresh = (await wasHomepageRecentlyAccessed(env.DB, now))
-      ? refreshPublicHomepageSnapshotIfNeeded({
-          db: env.DB,
-          now,
-          compute: () => computePublicHomepagePayload(env.DB, Math.floor(Date.now() / 1000)),
-        })
-      : refreshPublicHomepageArtifactSnapshotIfNeeded({
+  const queueHomepageRefresh = async (completed: CompletedDueMonitor[] = []) => {
+    try {
+      if (!(await wasHomepageRecentlyAccessed(env.DB, now))) {
+        await refreshPublicHomepageArtifactSnapshotIfNeeded({
           db: env.DB,
           now,
           compute: () =>
             computePublicHomepageArtifactPayload(env.DB, Math.floor(Date.now() / 1000)),
         });
+        return;
+      }
 
-    return refresh.catch((err) => {
+      const [stateSnapshot, artifactGeneratedAt] = await Promise.all([
+        readHomepageStateSnapshotJson(env.DB),
+        readHomepageArtifactSnapshotGeneratedAt(env.DB),
+      ]);
+      if (
+        isHomepageStateAndArtifactFreshForMinute({
+          stateGeneratedAt: stateSnapshot?.generatedAt ?? null,
+          artifactGeneratedAt,
+          now,
+        })
+      ) {
+        return;
+      }
+
+      const acquired = await acquireLease(env.DB, HOMEPAGE_REFRESH_LOCK_NAME, now, 55);
+      if (!acquired) {
+        return;
+      }
+
+      const [latestStateSnapshot, latestArtifactGeneratedAt] = await Promise.all([
+        readHomepageStateSnapshotJson(env.DB),
+        readHomepageArtifactSnapshotGeneratedAt(env.DB),
+      ]);
+      if (
+        isHomepageStateAndArtifactFreshForMinute({
+          stateGeneratedAt: latestStateSnapshot?.generatedAt ?? null,
+          artifactGeneratedAt: latestArtifactGeneratedAt,
+          now,
+        })
+      ) {
+        return;
+      }
+
+      const refreshNow = Math.floor(Date.now() / 1000);
+      const refreshedFromState =
+        latestStateSnapshot
+          ? await refreshHomepageStateAndArtifactFromState({
+              db: env.DB,
+              now: refreshNow,
+              completed,
+              storedState: latestStateSnapshot,
+            })
+          : false;
+      if (refreshedFromState) {
+        return;
+      }
+
+      const state = await buildPublicHomepageState(env.DB, refreshNow);
+      const includeHiddenMonitors = false;
+      const [activeIncidents, maintenanceWindows] = await Promise.all([
+        listVisibleActiveIncidents(env.DB, includeHiddenMonitors),
+        listVisibleMaintenanceWindows(env.DB, refreshNow, includeHiddenMonitors),
+      ]);
+      const payload = buildPublicHomepagePayloadFromState({
+        state,
+        now: refreshNow,
+        activeIncidents,
+        maintenanceWindows,
+        monitorLimit: 12,
+      });
+      const stateBodyJson = serializePublicHomepageState(state);
+
+      await writeHomepageStateAndArtifactJson({
+        db: env.DB,
+        now: refreshNow,
+        stateGeneratedAt: state.generated_at,
+        stateBodyJson,
+        artifactPayload: payload,
+      });
+    } catch (err) {
       console.warn('homepage snapshot: refresh failed', err);
-    });
+    }
   };
 
   const acquired = await acquireLease(env.DB, LOCK_NAME, now, LOCK_LEASE_SECONDS);
@@ -751,5 +953,5 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     console.log(`scheduled: processed ${settled.length} monitors at ${checkedAt}`);
   }
 
-  ctx.waitUntil(queueHomepageRefresh());
+  ctx.waitUntil(queueHomepageRefresh(completed));
 }

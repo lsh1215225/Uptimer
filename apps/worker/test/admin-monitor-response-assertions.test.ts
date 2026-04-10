@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 
 vi.mock('../src/snapshots', () => ({
-  refreshPublicHomepageSnapshotIfNeeded: vi.fn().mockResolvedValue(false),
+  refreshPublicHomepageStateAndArtifactIfNeeded: vi.fn().mockResolvedValue(false),
 }));
 vi.mock('../src/monitor/tcp', () => ({
   runTcpCheck: vi.fn(),

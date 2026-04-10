@@ -7,9 +7,15 @@ import type { Env } from '../env';
 import { hasValidAdminTokenRequest } from '../middleware/auth';
 import type { PublicHomepageResponse } from '../schemas/public-homepage';
 import {
+  buildPublicHomepagePayloadFromState,
   computePublicHomepagePayload,
+  parsePublicHomepageState,
   homepageFromStatusPayload,
 } from '../public/homepage';
+import {
+  listVisibleActiveIncidents,
+  listVisibleMaintenanceWindows,
+} from '../public/data';
 import { computePublicStatusPayload } from '../public/status';
 import {
   buildNumberedPlaceholders,
@@ -26,6 +32,7 @@ import {
   applyStatusCacheHeaders,
   readHomepageSnapshotArtifactJson,
   readHomepageSnapshotJson,
+  readHomepageStateSnapshotJson,
   readStaleHomepageSnapshotJson,
   readStatusSnapshot,
   readStatusSnapshotJson,
@@ -48,6 +55,7 @@ type PublicStatusSnapshotRow = {
 };
 
 const HOMEPAGE_UNKNOWN_DOWNGRADE_GUARD_SECONDS = 2 * 60;
+const HOMEPAGE_STATE_FAST_PATH_MAX_AGE_SECONDS = 2 * 60;
 
 function safeJsonParse(text: string): unknown | null {
   const trimmed = text.trim();
@@ -154,6 +162,45 @@ function homepagePreviewsFromArtifact(
     resolvedIncidentPreview: artifact.data.snapshot.resolved_incident_preview,
     maintenanceHistoryPreview: artifact.data.snapshot.maintenance_history_preview,
   };
+}
+
+async function tryBuildHomepageFromStateSnapshot(
+  db: D1Database,
+  now: number,
+  stored?: { generatedAt: number; bodyJson: string } | null,
+): Promise<PublicHomepageResponse | null> {
+  const snapshot = stored ?? (await readHomepageStateSnapshotJson(db));
+  if (!snapshot) {
+    return null;
+  }
+
+  const age = Math.max(0, now - snapshot.generatedAt);
+  if (age > HOMEPAGE_STATE_FAST_PATH_MAX_AGE_SECONDS) {
+    return null;
+  }
+
+  let state = null;
+  try {
+    state = parsePublicHomepageState(JSON.parse(snapshot.bodyJson) as unknown);
+  } catch {
+    state = null;
+  }
+  if (!state) {
+    return null;
+  }
+
+  const includeHiddenMonitors = false;
+  const [activeIncidents, maintenanceWindows] = await Promise.all([
+    listVisibleActiveIncidents(db, includeHiddenMonitors),
+    listVisibleMaintenanceWindows(db, now, includeHiddenMonitors),
+  ]);
+
+  return buildPublicHomepagePayloadFromState({
+    state,
+    now,
+    activeIncidents,
+    maintenanceWindows,
+  });
 }
 
 async function readStaleStatusSnapshot(
@@ -634,8 +681,16 @@ publicRoutes.get('/homepage', async (c) => {
         console.warn('homepage access: mark failed', err);
       }),
     );
-  const snapshot = await readHomepageSnapshotJson(c.env.DB, now);
-  if (snapshot) {
+  const [snapshot, stateSnapshot] = await Promise.all([
+    readHomepageSnapshotJson(c.env.DB, now),
+    readHomepageStateSnapshotJson(c.env.DB),
+  ]);
+  const snapshotGeneratedAt = snapshot ? now - snapshot.age : null;
+  if (
+    snapshot &&
+    (!stateSnapshot ||
+      (snapshotGeneratedAt !== null && stateSnapshot.generatedAt <= snapshotGeneratedAt))
+  ) {
     if (snapshot.age >= 30) {
       markHomepageAccess();
     }
@@ -648,7 +703,8 @@ publicRoutes.get('/homepage', async (c) => {
   const artifactSnapshotPromise = readStaleHomepageSnapshotArtifact(c.env.DB, now);
 
   try {
-    const payload = await computePublicHomepagePayload(c.env.DB, now);
+    const statePayload = await tryBuildHomepageFromStateSnapshot(c.env.DB, now, stateSnapshot);
+    const payload = statePayload ?? (await computePublicHomepagePayload(c.env.DB, now));
     const artifactSnapshot = await artifactSnapshotPromise;
     if (
       artifactSnapshot &&
