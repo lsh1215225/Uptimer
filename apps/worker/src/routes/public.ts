@@ -26,6 +26,7 @@ import {
   readHomepageSnapshotArtifactJson,
   readHomepageSnapshotJson,
   readStatusSnapshot,
+  readStatusSnapshotJson,
   readStaleHomepageSnapshot,
   readStaleHomepageSnapshotArtifact,
   readStaleHomepageSnapshotArtifactJson,
@@ -540,24 +541,11 @@ publicRoutes.get('/status', async (c) => {
     return applyPrivateNoStore(c.json(payload));
   }
 
-  const snapshot = await readStatusSnapshot(c.env.DB, now);
+  const snapshot = await readStatusSnapshotJson(c.env.DB, now);
   if (snapshot) {
-    const res = c.json(snapshot.data);
+    c.header('Content-Type', 'application/json; charset=utf-8');
+    const res = c.body(snapshot.bodyJson);
     applyStatusCacheHeaders(res, snapshot.age);
-
-    // If we're close to the freshness boundary, trigger a background refresh.
-    if (snapshot.age >= 30) {
-      c.executionCtx.waitUntil(
-        (async () => {
-          const refreshedAt = Math.floor(Date.now() / 1000);
-          const payload = await computePublicStatusPayload(c.env.DB, refreshedAt);
-          await writeStatusSnapshot(c.env.DB, refreshedAt, payload);
-        })().catch((err) => {
-          console.warn('public snapshot: refresh failed', err);
-        }),
-      );
-    }
-
     return res;
   }
   try {
