@@ -217,4 +217,24 @@ describe('pages homepage worker', () => {
     const cachedResponse = vi.mocked(put).mock.calls[0]?.[1];
     expect(cachedResponse?.headers.get('Set-Cookie')).toBeNull();
   });
+
+  it('never throws a 1101 for HTML navigations when the asset pipeline errors', async () => {
+    installDefaultCacheMock(() => undefined);
+    const env = makeEnv();
+    env.ASSETS.fetch = vi.fn(async () => {
+      throw new Error('asset fetch failed');
+    });
+
+    const res = await pageWorker.fetch(
+      new Request('https://status.example.com/', {
+        headers: { Accept: 'text/html' },
+      }),
+      env,
+      { waitUntil: vi.fn() },
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Content-Type')).toContain('text/html');
+    expect(await res.text()).toContain('<div id="root"></div>');
+  });
 });
