@@ -22,10 +22,7 @@ import { runTcpCheck } from '../monitor/tcp';
 import type { CheckOutcome } from '../monitor/types';
 import { dispatchWebhookToChannels, type WebhookChannel } from '../notify/webhook';
 import { computePublicHomepageArtifactPayload } from '../public/homepage';
-import {
-  refreshPublicHomepageArtifactSnapshotIfNeeded,
-  refreshPublicHomepageSnapshotSqlIfNeeded,
-} from '../snapshots';
+import { refreshPublicHomepageArtifactSnapshotIfNeeded } from '../snapshots';
 import { readSettings } from '../settings';
 import { acquireLease } from './lock';
 
@@ -594,6 +591,14 @@ function queueMonitorNotification(
 export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const checkedAt = Math.floor(now / 60) * 60;
+  const queueHomepageRefresh = () =>
+    refreshPublicHomepageArtifactSnapshotIfNeeded({
+      db: env.DB,
+      now,
+      compute: () => computePublicHomepageArtifactPayload(env.DB, Math.floor(Date.now() / 1000)),
+    }).catch((err) => {
+      console.warn('homepage snapshot: refresh failed', err);
+    });
 
   const acquired = await acquireLease(env.DB, LOCK_NAME, now, LOCK_LEASE_SECONDS);
   if (!acquired) {
@@ -605,33 +610,6 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
     readSettings(env.DB),
     listDueMonitors(env.DB, checkedAt),
   ]);
-
-  const queueHomepageRefresh = () => {
-    const refreshNow = Math.floor(Date.now() / 1000);
-    const refreshArtifact = refreshPublicHomepageArtifactSnapshotIfNeeded({
-      db: env.DB,
-      now: refreshNow,
-      compute: () => computePublicHomepageArtifactPayload(env.DB, refreshNow),
-    }).catch((err) => {
-      console.warn('homepage artifact snapshot: refresh failed', err);
-    });
-
-    const refreshData = refreshPublicHomepageSnapshotSqlIfNeeded({
-      db: env.DB,
-      now: refreshNow,
-      settings: {
-        site_title: settings.site_title,
-        site_description: settings.site_description,
-        site_locale: settings.site_locale,
-        site_timezone: settings.site_timezone,
-        uptime_rating_level: settings.uptime_rating_level,
-      },
-    }).catch((err) => {
-      console.warn('homepage snapshot: sql refresh failed', err);
-    });
-
-    return Promise.all([refreshArtifact, refreshData]);
-  };
 
   const notify: NotifyContext | null =
     channels.length === 0
