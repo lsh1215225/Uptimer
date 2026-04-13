@@ -310,7 +310,18 @@ function computeStateLastError(
   return outcome.status === 'up' ? null : outcome.error;
 }
 
-function buildPersistStatements(completed: CompletedDueMonitor, db: D1Database): D1PreparedStatement[] {
+type PersistStatementTemplates = {
+  insertCheckResult: D1PreparedStatement;
+  upsertMonitorState: D1PreparedStatement;
+  openOutageIfMissing: D1PreparedStatement;
+  closeOutage: D1PreparedStatement;
+  updateOutageLastError: D1PreparedStatement;
+};
+
+function buildPersistStatements(
+  completed: CompletedDueMonitor,
+  templates: PersistStatementTemplates,
+): D1PreparedStatement[] {
   const {
     row,
     checkedAt,
@@ -324,20 +335,7 @@ function buildPersistStatements(completed: CompletedDueMonitor, db: D1Database):
   const statements: D1PreparedStatement[] = [];
 
   statements.push(
-    db.prepare(
-      `
-      INSERT INTO check_results (
-        monitor_id,
-        checked_at,
-        status,
-        latency_ms,
-        http_status,
-        error,
-        location,
-        attempt
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-    `,
-    ).bind(
+    templates.insertCheckResult.bind(
       row.id,
       checkedAt,
       outcome.status,
@@ -350,28 +348,7 @@ function buildPersistStatements(completed: CompletedDueMonitor, db: D1Database):
   );
 
   statements.push(
-    db.prepare(
-      `
-      INSERT INTO monitor_state (
-        monitor_id,
-        status,
-        last_checked_at,
-        last_changed_at,
-        last_latency_ms,
-        last_error,
-        consecutive_failures,
-        consecutive_successes
-      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-      ON CONFLICT(monitor_id) DO UPDATE SET
-        status = excluded.status,
-        last_checked_at = excluded.last_checked_at,
-        last_changed_at = excluded.last_changed_at,
-        last_latency_ms = excluded.last_latency_ms,
-        last_error = excluded.last_error,
-        consecutive_failures = excluded.consecutive_failures,
-        consecutive_successes = excluded.consecutive_successes
-    `,
-    ).bind(
+    templates.upsertMonitorState.bind(
       row.id,
       next.status,
       checkedAt,
@@ -385,35 +362,21 @@ function buildPersistStatements(completed: CompletedDueMonitor, db: D1Database):
 
   if (outageAction === 'open') {
     statements.push(
-      db.prepare(
-        `
-        INSERT INTO outages (monitor_id, started_at, ended_at, initial_error, last_error)
-        SELECT ?1, ?2, NULL, ?3, ?4
-        WHERE NOT EXISTS (
-          SELECT 1 FROM outages WHERE monitor_id = ?5 AND ended_at IS NULL
-        )
-      `,
-      ).bind(row.id, checkedAt, checkError ?? 'down', checkError ?? 'down', row.id),
+      templates.openOutageIfMissing.bind(
+        row.id,
+        checkedAt,
+        checkError ?? 'down',
+        checkError ?? 'down',
+        row.id,
+      ),
     );
   } else if (outageAction === 'close') {
     statements.push(
-      db.prepare(
-        `
-        UPDATE outages
-        SET ended_at = ?1
-        WHERE monitor_id = ?2 AND ended_at IS NULL
-      `,
-      ).bind(checkedAt, row.id),
+      templates.closeOutage.bind(checkedAt, row.id),
     );
   } else if (outageAction === 'update' && checkError) {
     statements.push(
-      db.prepare(
-        `
-        UPDATE outages
-        SET last_error = ?1
-        WHERE monitor_id = ?2 AND ended_at IS NULL
-      `,
-      ).bind(checkError, row.id),
+      templates.updateOutageLastError.bind(checkError, row.id),
     );
   }
 
@@ -515,12 +478,74 @@ async function persistCompletedMonitors(
   db: D1Database,
   completed: CompletedDueMonitor[],
 ): Promise<void> {
+  const templates: PersistStatementTemplates = {
+    insertCheckResult: db.prepare(
+      `
+      INSERT INTO check_results (
+        monitor_id,
+        checked_at,
+        status,
+        latency_ms,
+        http_status,
+        error,
+        location,
+        attempt
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    `,
+    ),
+    upsertMonitorState: db.prepare(
+      `
+      INSERT INTO monitor_state (
+        monitor_id,
+        status,
+        last_checked_at,
+        last_changed_at,
+        last_latency_ms,
+        last_error,
+        consecutive_failures,
+        consecutive_successes
+      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+      ON CONFLICT(monitor_id) DO UPDATE SET
+        status = excluded.status,
+        last_checked_at = excluded.last_checked_at,
+        last_changed_at = excluded.last_changed_at,
+        last_latency_ms = excluded.last_latency_ms,
+        last_error = excluded.last_error,
+        consecutive_failures = excluded.consecutive_failures,
+        consecutive_successes = excluded.consecutive_successes
+    `,
+    ),
+    openOutageIfMissing: db.prepare(
+      `
+      INSERT INTO outages (monitor_id, started_at, ended_at, initial_error, last_error)
+      SELECT ?1, ?2, NULL, ?3, ?4
+      WHERE NOT EXISTS (
+        SELECT 1 FROM outages WHERE monitor_id = ?5 AND ended_at IS NULL
+      )
+    `,
+    ),
+    closeOutage: db.prepare(
+      `
+      UPDATE outages
+      SET ended_at = ?1
+      WHERE monitor_id = ?2 AND ended_at IS NULL
+    `,
+    ),
+    updateOutageLastError: db.prepare(
+      `
+      UPDATE outages
+      SET last_error = ?1
+      WHERE monitor_id = ?2 AND ended_at IS NULL
+    `,
+    ),
+  };
+
   for (let i = 0; i < completed.length; i += PERSIST_BATCH_SIZE) {
     const chunk = completed.slice(i, i + PERSIST_BATCH_SIZE);
     const statements: D1PreparedStatement[] = [];
 
     for (const monitor of chunk) {
-      statements.push(...buildPersistStatements(monitor, db));
+      statements.push(...buildPersistStatements(monitor, templates));
     }
 
     if (statements.length > 0) {
